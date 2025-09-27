@@ -12,6 +12,7 @@ import ParticleRenderer from "./mls-mpm/particleRenderer";
 import BackgroundGeometry from "./backgroundGeometry";
 import { bloom } from 'three/examples/jsm/tsl/display/BloomNode.js';
 import PointRenderer from "./mls-mpm/pointRenderer.js";
+import SoundReactivity from "./audio/soundReactivity";
 
 const loadHdr = async (file) => {
     const texture = await new Promise(resolve => {
@@ -34,6 +35,8 @@ class App {
     controls = null;
 
     lights = null;
+
+    soundReactivity = null;
 
     constructor(renderer) {
         this.renderer = renderer;
@@ -92,6 +95,10 @@ class App {
         const backgroundGeometry = new BackgroundGeometry();
         await backgroundGeometry.init();
         this.scene.add(backgroundGeometry.object);
+
+        this.soundReactivity = new SoundReactivity();
+        await this.soundReactivity.init();
+        conf.attachSoundReactivity(this.soundReactivity);
 
 
         const scenePass = pass(this.scene, this.camera);
@@ -158,6 +165,9 @@ class App {
         this.lights.update(elapsed);
         this.particleRenderer.update();
         this.pointRenderer.update();
+
+        const audioProfile = this.soundReactivity ? this.soundReactivity.update(delta, elapsed) : null;
+        this.mlsMpmSim.setAudioProfile(audioProfile);
 
         await this.mlsMpmSim.update(delta,elapsed);
 

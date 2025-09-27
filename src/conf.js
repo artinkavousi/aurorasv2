@@ -25,6 +25,23 @@ class Conf {
 
     points = false;
 
+    audioEnabled = false;
+    audioSource = "microphone";
+    audioSensitivity = 1.0;
+    audioSmoothing = 0.65;
+    audioDynamics = 0.8;
+    audioBassGain = 1.1;
+    audioMidGain = 1.0;
+    audioTrebleGain = 1.0;
+    audioFlow = 0.6;
+    audioSwirl = 0.55;
+    audioDisplacement = 0.35;
+    audioColorBoost = 0.8;
+    audioBeatHold = 0.12;
+    audioBeatDecay = 0.92;
+    audioBeatRelease = 1.6;
+    audioMetrics = { level: 0, beat: 0, bass: 0, mid: 0, treble: 0 };
+
     constructor(info) {
         if (mobile()) {
             this.maxParticles = 8192 * 8;
@@ -108,6 +125,97 @@ class Conf {
         this.gui = gui;
     }
 
+    attachSoundReactivity(soundReactivity) {
+        if (!this.gui || !soundReactivity) { return; }
+        if (this.soundFolder) {
+            this.soundFolder.dispose();
+        }
+
+        this.soundFolder = this.gui.addFolder({
+            title: "sound-reactivity",
+            expanded: false,
+        });
+
+        this.soundFolder.addBinding(this, "audioEnabled", { label: "enabled" }).on('change', (ev) => {
+            if (ev.value) {
+                soundReactivity.enable();
+            } else {
+                soundReactivity.disable();
+            }
+        });
+
+        this.soundFolder.addBinding(this, "audioSource", {
+            view: 'list',
+            label: 'input',
+            options: [
+                { text: 'microphone', value: 'microphone' },
+                { text: 'audio file', value: 'file' },
+            ],
+        }).on('change', (ev) => {
+            this.audioSource = ev.value;
+            soundReactivity.setSource(ev.value);
+            if (ev.value === 'file') {
+                soundReactivity.openFileDialog();
+            }
+        });
+
+        this.soundFolder.addButton({ title: 'select audio file' }).on('click', () => {
+            soundReactivity.openFileDialog();
+        });
+
+        this.soundFolder.addButton({ title: 'reset calibration' }).on('click', () => {
+            soundReactivity.resetCalibration();
+        });
+
+        const calibration = this.soundFolder.addFolder({
+            title: 'calibration',
+            expanded: false,
+        });
+        calibration.addBinding(this, "audioSensitivity", { min: 0.2, max: 3, step: 0.05 });
+        calibration.addBinding(this, "audioSmoothing", { min: 0, max: 0.95, step: 0.01 });
+        calibration.addBinding(this, "audioDynamics", { min: 0.25, max: 3, step: 0.05 });
+
+        const bands = this.soundFolder.addFolder({
+            title: 'band gains',
+            expanded: false,
+        });
+        bands.addBinding(this, "audioBassGain", { min: 0.1, max: 3, step: 0.05, label: 'bass' });
+        bands.addBinding(this, "audioMidGain", { min: 0.1, max: 3, step: 0.05, label: 'mid' });
+        bands.addBinding(this, "audioTrebleGain", { min: 0.1, max: 3, step: 0.05, label: 'treble' });
+
+        const choreography = this.soundFolder.addFolder({
+            title: 'choreography',
+            expanded: false,
+        });
+        choreography.addBinding(this, "audioDisplacement", { min: 0.1, max: 1.2, step: 0.05, label: 'displacement' });
+        choreography.addBinding(this, "audioFlow", { min: 0, max: 2, step: 0.05, label: 'groove' });
+        choreography.addBinding(this, "audioSwirl", { min: 0, max: 2, step: 0.05, label: 'swirl' });
+        choreography.addBinding(this, "audioColorBoost", { min: 0, max: 2, step: 0.05, label: 'color' });
+
+        const beat = this.soundFolder.addFolder({
+            title: 'beat detection',
+            expanded: false,
+        });
+        beat.addBinding(this, "audioBeatHold", { min: 0.05, max: 0.5, step: 0.01, label: 'hold' });
+        beat.addBinding(this, "audioBeatDecay", { min: 0.5, max: 0.99, step: 0.01, label: 'decay' });
+        beat.addBinding(this, "audioBeatRelease", { min: 0.5, max: 5, step: 0.1, label: 'release' });
+
+        const metrics = this.soundFolder.addFolder({
+            title: 'metrics',
+            expanded: false,
+        });
+        metrics.addMonitor(this.audioMetrics, 'level', { view: 'graph', min: 0, max: 1, interval: 16 });
+        metrics.addMonitor(this.audioMetrics, 'beat', { min: 0, max: 1, interval: 16 });
+        metrics.addMonitor(this.audioMetrics, 'bass', { min: 0, max: 2, interval: 16 });
+        metrics.addMonitor(this.audioMetrics, 'mid', { min: 0, max: 2, interval: 16 });
+        metrics.addMonitor(this.audioMetrics, 'treble', { min: 0, max: 2, interval: 16 });
+
+        soundReactivity.setSource(this.audioSource);
+        if (this.audioEnabled) {
+            soundReactivity.enable();
+        }
+    }
+
     update() {
     }
 
@@ -117,5 +225,11 @@ class Conf {
     end() {
         this.fpsGraph.end();
     }
+
+    updateAudioMetrics(metrics) {
+        if (!metrics) { return; }
+        Object.assign(this.audioMetrics, metrics);
+    }
 }
+
 export const conf = new Conf();
