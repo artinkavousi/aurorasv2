@@ -84,6 +84,11 @@ class mlsMpmSimulator {
         this.uniforms.restDensity = uniform(0);
         this.uniforms.dynamicViscosity = uniform(0);
         this.uniforms.noise = uniform(0);
+        this.uniforms.audioLevel = uniform(0);
+        this.uniforms.audioBeat = uniform(0);
+        this.uniforms.audioBands = uniform(new THREE.Vector3());
+        this.uniforms.audioFlow = uniform(new THREE.Vector3());
+        this.uniforms.audioColorPulse = uniform(0);
 
         this.uniforms.gridSize = uniform(this.gridSize, "ivec3");
         this.uniforms.gridCellSize = uniform(this.gridCellSize);
@@ -311,6 +316,15 @@ class mlsMpmSimulator {
                 });
             });
 
+            const audioLevel = this.uniforms.audioLevel.toConst("audioLevel");
+            const audioBeat = this.uniforms.audioBeat.toConst("audioBeat");
+            const audioBands = this.uniforms.audioBands.toConst("audioBands");
+            const audioFlow = this.uniforms.audioFlow.toConst("audioFlow");
+            particleVelocity.addAssign(audioFlow.mul(audioLevel).mul(this.uniforms.dt).mul(4.0));
+            const center = vec3(this.uniforms.gridSize).mul(0.5).toConst("audioCenter");
+            const beatVector = particlePosition.sub(center).normalize().mul(audioBeat.mul(0.6));
+            particleVelocity.addAssign(beatVector);
+
             const dist = cross(this.uniforms.mouseRayDirection, particlePosition.mul(vec3(1,1,0.4)).sub(this.uniforms.mouseRayOrigin)).length()
             const force = dist.mul(0.1).oneMinus().max(0.0).pow(2);
             //particleVelocity.assign(mix(particleVelocity, this.uniforms.mouseForce.mul(6), force));
@@ -338,7 +352,13 @@ class mlsMpmSimulator {
             const direction = this.particleBuffer.element(instanceIndex).get('direction');
             direction.assign(mix(direction,particleVelocity, 0.1));
 
-            const color = hsvtorgb(vec3(particleDensity.div(this.uniforms.restDensity).mul(0.25).add(time.mul(0.05)), particleVelocity.length().mul(0.5).clamp(0,1).mul(0.3).add(0.7), force.mul(0.3).add(0.7)));
+            const audioColorPulse = this.uniforms.audioColorPulse.toConst("audioColorPulse");
+            const hue = particleDensity.div(this.uniforms.restDensity).mul(0.25).add(time.mul(0.05)).add(audioBands.z.mul(audioLevel).mul(0.08));
+            const saturationBase = particleVelocity.length().mul(0.5).clamp(0,1).mul(0.3).add(0.7).add(audioBands.y.mul(audioLevel).mul(0.4));
+            const saturation = clamp(saturationBase, float(0), float(1));
+            const valueBase = force.mul(0.3).add(0.7).add(audioColorPulse.mul(0.4)).add(audioBeat.mul(0.1));
+            const value = clamp(valueBase, float(0), float(1));
+            const color = hsvtorgb(vec3(hue, saturation, value));
             this.particleBuffer.element(instanceIndex).get('color').assign(color);
         })().compute(1);
     }
@@ -394,6 +414,22 @@ class mlsMpmSimulator {
             const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
             await this.renderer.computeAsync(kernels);
         }
+    }
+
+    setAudioProfile(profile) {
+        if (!profile) {
+            this.uniforms.audioLevel.value = 0;
+            this.uniforms.audioBeat.value = 0;
+            this.uniforms.audioBands.value.set(0,0,0);
+            this.uniforms.audioFlow.value.set(0,0,0);
+            this.uniforms.audioColorPulse.value = 0;
+            return;
+        }
+        this.uniforms.audioLevel.value = profile.level;
+        this.uniforms.audioBeat.value = profile.beat;
+        this.uniforms.audioBands.value.set(profile.bands.low, profile.bands.mid, profile.bands.high);
+        this.uniforms.audioFlow.value.copy(profile.flow);
+        this.uniforms.audioColorPulse.value = profile.colorPulse;
     }
 }
 
