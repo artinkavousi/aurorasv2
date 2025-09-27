@@ -7,11 +7,12 @@ import hdri from "./assets/autumn_field_puresky_1k.hdr";
 import { float, Fn, mrt, output, pass, vec3, vec4 } from "three/tsl";
 import {conf} from "./conf";
 import {Info} from "./info";
-import MlsMpmSimulator from "./mls-mpm/mlsMpmSimulator";
-import ParticleRenderer from "./mls-mpm/particleRenderer";
 import BackgroundGeometry from "./backgroundGeometry";
 import { bloom } from 'three/examples/jsm/tsl/display/BloomNode.js';
-import PointRenderer from "./mls-mpm/pointRenderer.js";
+import ModuleManager from "./framework/moduleManager";
+import createMlsMpmModule from "./physics/modules/mlsMpmModule";
+import createParticleSurfaceRendererModule from "./rendering/modules/particleSurfaceRendererModule";
+import createPointCloudRendererModule from "./rendering/modules/pointCloudRendererModule";
 
 const loadHdr = async (file) => {
     const texture = await new Promise(resolve => {
@@ -35,6 +36,14 @@ class App {
 
     lights = null;
 
+    moduleManager = null;
+
+    physicsInstance = null;
+
+    particleRendererInstance = null;
+
+    pointRendererInstance = null;
+
     constructor(renderer) {
         this.renderer = renderer;
     }
@@ -48,6 +57,17 @@ class App {
         this.camera.updateProjectionMatrix()
 
         this.scene = new THREE.Scene();
+
+        this.moduleManager = new ModuleManager({
+            renderer: this.renderer,
+            scene: this.scene,
+            camera: this.camera,
+        });
+
+        this.moduleManager
+            .registerPhysicsModule(createMlsMpmModule())
+            .registerRendererModule(createParticleSurfaceRendererModule())
+            .registerRendererModule(createPointCloudRendererModule());
 
         this.controls = new OrbitControls(this.camera, this.renderer.domElement);
         this.controls.target.set(0,0.5,0.2);
@@ -79,12 +99,9 @@ class App {
 
         await progressCallback(0.5)
 
-        this.mlsMpmSim = new MlsMpmSimulator(this.renderer);
-        await this.mlsMpmSim.init();
-        this.particleRenderer = new ParticleRenderer(this.mlsMpmSim);
-        this.scene.add(this.particleRenderer.object);
-        this.pointRenderer = new PointRenderer(this.mlsMpmSim);
-        this.scene.add(this.pointRenderer.object);
+        this.physicsInstance = await this.moduleManager.activatePhysicsModule("mls-mpm");
+        this.particleRendererInstance = await this.moduleManager.activateRendererModule("mls-surface");
+        this.pointRendererInstance = await this.moduleManager.activateRendererModule("mls-points");
 
         this.lights = new Lights();
         this.scene.add(this.lights.object);
@@ -136,6 +153,9 @@ class App {
     }
 
     onMouseMove(event) {
+        if (!this.moduleManager) {
+            return;
+        }
         const pointer = new THREE.Vector2();
         pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
         pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -143,7 +163,7 @@ class App {
         const intersect = new THREE.Vector3();
         this.raycaster.ray.intersectPlane(this.plane, intersect);
         if (intersect) {
-            this.mlsMpmSim.setMouseRay(this.raycaster.ray.origin, this.raycaster.ray.direction, intersect);
+            this.moduleManager.handlePointerRay(this.raycaster.ray.origin, this.raycaster.ray.direction, intersect);
         }
     }
 
@@ -151,15 +171,19 @@ class App {
     async update(delta, elapsed) {
         conf.begin();
 
-        this.particleRenderer.object.visible = !conf.points;
-        this.pointRenderer.object.visible = conf.points;
+        if (this.particleRendererInstance?.object3d) {
+            this.particleRendererInstance.object3d.visible = !conf.points;
+        }
+        if (this.pointRendererInstance?.object3d) {
+            this.pointRendererInstance.object3d.visible = conf.points;
+        }
 
         this.controls.update(delta);
         this.lights.update(elapsed);
-        this.particleRenderer.update();
-        this.pointRenderer.update();
 
-        await this.mlsMpmSim.update(delta,elapsed);
+        if (this.moduleManager) {
+            await this.moduleManager.update(delta, elapsed);
+        }
 
         if (conf.bloom) {
             await this.postProcessing.renderAsync();
