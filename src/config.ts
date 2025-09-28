@@ -58,8 +58,20 @@ export interface PostFxConfig {
   bloomThreshold: number;
   bloomStrength: number;
   bloomRadius: number;
-  chromaticAberration: number;
-  vignetteStrength: number;
+  focusCenter: [number, number];
+  focusInnerRadius: number;
+  focusOuterRadius: number;
+  blurStrength: number;
+  blurIterations: number;
+  chromaticAberrationStrength: number;
+  chromaticAberrationScale: number;
+  lensStreaks: boolean;
+  lensStreakIntensity: number;
+  lensStreakThreshold: number;
+  lensStreakStretch: number;
+  temporalEnabled: boolean;
+  temporalFeedback: number;
+  temporalBlend: number;
 }
 
 export interface AudioConfig {
@@ -155,11 +167,23 @@ export const defaultConfig: AppConfig = {
   },
   postfx: {
     bloom: true,
-    bloomThreshold: 0.001,
-    bloomStrength: 0.94,
-    bloomRadius: 0.8,
-    chromaticAberration: 0.0025,
-    vignetteStrength: 0.4,
+    bloomThreshold: 0.82,
+    bloomStrength: 0.9,
+    bloomRadius: 0.6,
+    focusCenter: [0.5, 0.5],
+    focusInnerRadius: 0.2,
+    focusOuterRadius: 0.62,
+    blurStrength: 0.045,
+    blurIterations: 36,
+    chromaticAberrationStrength: 0.9,
+    chromaticAberrationScale: 1.1,
+    lensStreaks: true,
+    lensStreakIntensity: 0.28,
+    lensStreakThreshold: 0.88,
+    lensStreakStretch: 2.4,
+    temporalEnabled: true,
+    temporalFeedback: 0.85,
+    temporalBlend: 0.5,
   },
   audio: {
     enabled: false,
