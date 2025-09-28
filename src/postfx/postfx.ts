@@ -2,7 +2,7 @@
 import * as THREE from "three/webgpu";
 import { bloom } from "three/examples/jsm/tsl/display/BloomNode.js";
 import { float, Fn, mrt, output, pass, vec3, vec4 } from "three/tsl";
-import type { ModuleInstance, TickInfo, AppContext, PostFxService } from "../context";
+import type { ModuleInstance, TickInfo, AppContext, PostFxService } from "../config";
 import type { AppConfig } from "../config";
 
 interface PostfxState {

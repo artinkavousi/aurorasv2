@@ -1,6 +1,6 @@
 // @ts-nocheck
 import * as THREE from "three/webgpu";
-import type { ModuleInstance, TickInfo, AppContext, AudioProfile, AudioService } from "../context";
+import type { ModuleInstance, TickInfo, AppContext, AudioProfile, AudioService } from "../config";
 import type { AudioConfig } from "../config";
 
 const ZERO_PROFILE: AudioProfile = Object.freeze({

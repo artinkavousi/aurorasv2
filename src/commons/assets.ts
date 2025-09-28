@@ -1,5 +1,5 @@
 import * as THREE from "three/webgpu";
-import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
+import { HDRLoader } from "three/examples/jsm/loaders/HDRLoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 
 type AssetEntry =
@@ -105,7 +105,7 @@ const hdriCache = new Map<AssetEntry, Promise<THREE.DataTexture>>();
 const textureCache = new Map<AssetEntry, Promise<THREE.Texture>>();
 const objCache = new Map<AssetEntry, Promise<THREE.Group>>();
 
-const rgbLoader = new RGBELoader();
+const rgbLoader = new HDRLoader();
 const textureLoader = new THREE.TextureLoader();
 const objLoader = new OBJLoader();
 

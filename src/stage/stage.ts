@@ -12,7 +12,7 @@ import { loadHdri, loadObj, loadTexture } from "../commons/assets";
 
 import type { StageConfig } from "../config";
 
-import type { AppContext, ModuleInstance, TickInfo, ResizeInfo, StageHandle, StageService, PointerRay } from "../context";
+import type { AppContext, ModuleInstance, TickInfo, ResizeInfo, StageHandle, StageService, PointerRay } from "../config";
 
 
 

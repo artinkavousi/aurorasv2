@@ -16,7 +16,7 @@ import {
   uniform,
 } from "three/tsl";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import type { ModuleInstance, TickInfo, AppContext, PhysicsService, MeshRendererService } from "../context";
+import type { ModuleInstance, TickInfo, AppContext, PhysicsService, MeshRendererService } from "../config";
 import type { PhysicsConfig, PostFxConfig, RenderConfig } from "../config";
 
 interface MeshRendererState {
@@ -131,6 +131,8 @@ const createMeshResources = (simulator: PhysicsService["simulator"]) => {
     metalness: 0.9,
     roughness: 0.5,
   });
+  // Force per-vertex shading like legacy
+  material.flatShading = false;
 
   const sizeUniform = uniform(1);
   const vAo = varying(0, "vAo");
@@ -150,8 +152,10 @@ const createMeshResources = (simulator: PhysicsService["simulator"]) => {
       .mul(particleDensity.mul(0.4).add(0.5).clamp(0, 1))
       .add(particlePosition.mul(vec3(1, 1, 0.4)));
   })();
+  // No explicit normalNode: legacy uses v_normalView from positionNode path
   material.colorNode = particle.get("color");
   material.aoNode = vAo;
+  material.positionNode = material.positionNode; // ensure node binding
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.onBeforeShadow = () => {
@@ -182,7 +186,10 @@ const applyConfig = (
   physicsConfig: PhysicsConfig,
   postfxConfig: PostFxConfig
 ) => {
-  state.sizeUniform.value = renderConfig.size;
+  // Legacy-like scaling: actual size decreases with particle count
+  const level = Math.max(physicsConfig.particleCount / 8192, 1);
+  const actualSize = (1.6 / Math.pow(level, 1 / 3)) * renderConfig.size;
+  state.sizeUniform.value = actualSize;
   state.geometry.instanceCount = physicsConfig.particleCount;
   const bloom = postfxConfig.bloom;
   if (bloom && !state.material.mrtNode) {

@@ -16,6 +16,7 @@ import {
   atomicAdd,
   uint,
   max,
+  pow,
     mat3,
   clamp,
   time,
@@ -26,7 +27,7 @@ import {
 import { triNoise3Dvec } from "../commons/tsl/noise";
 import { hsvtorgb } from "../commons/tsl/hsv";
 import { StructuredArray } from "./structuredArray";
-import type { ModuleInstance, TickInfo, AppContext, AudioProfile, PointerRay, PhysicsService } from "../context";
+import type { ModuleInstance, TickInfo, AppContext, AudioProfile, PointerRay, PhysicsService } from "../config";
 import type { PhysicsConfig } from "../config";
 
 interface PhysicsState extends PhysicsConfig {
@@ -90,15 +91,28 @@ class MlsMpmSimulator {
       this.particleBuffer.set(i, "mass", mass);
     }
 
+    // Upload initial data to GPU buffer
+    this.particleBuffer.commit();
+
+    // Initialize simulation counts and key uniforms so the first frame renders particles
+    this.numParticles = this.params.particleCount ?? this.numParticles;
+    this.uniforms.numParticles = this.uniforms.numParticles || uniform(0, "uint");
+    this.uniforms.numParticles.value = this.numParticles;
+    // Initialize gravity to current config vector for first frame
+    if (this.params.gravityVector) {
+      this.uniforms.gravity = this.uniforms.gravity || uniform(new THREE.Vector3());
+      this.uniforms.gravity.value.copy(this.params.gravityVector);
+    }
+
     const cellCount = this.gridSize.x * this.gridSize.y * this.gridSize.z;
     const cellStruct = {
       x: { type: "int", atomic: true },
       y: { type: "int", atomic: true },
       z: { type: "int", atomic: true },
-      mass: { type: "int", atomic: true },
+      mass: { type: "int", atomic: false },
     };
     this.cellBuffer = new StructuredArray(cellStruct, cellCount, "cellData");
-    this.cellBufferF = instancedArray(cellCount, "vec4").label("cellDataF");
+    this.cellBufferF = instancedArray(cellCount, "vec4").setName("cellDataF");
 
     this.uniforms.gravityType = uniform(0, "uint");
     this.uniforms.gravity = uniform(new THREE.Vector3());
@@ -204,7 +218,7 @@ class MlsMpmSimulator {
           });
         });
       });
-    })().compute(1);
+    })().compute(maxParticles);
 
     this.kernels.p2g2 = Fn(() => {
       this.cellBuffer.setAtomic("x", true);
@@ -212,39 +226,62 @@ class MlsMpmSimulator {
       this.cellBuffer.setAtomic("z", true);
       this.cellBuffer.setAtomic("mass", false);
 
-      If(instanceIndex.greaterThanEqual(uint(this.uniforms.numParticles)), () => {
-        Return();
-      });
-      const particlePosition = this.particleBuffer
-        .element(instanceIndex)
-        .get("position")
-        .xyz.toConst("particlePosition");
+      If(instanceIndex.greaterThanEqual(uint(this.uniforms.numParticles)), () => { Return(); });
+      const particlePosition = this.particleBuffer.element(instanceIndex).get('position').xyz.toConst('particlePosition');
 
-      const cellIndex = ivec3(particlePosition).sub(1).toConst("cellIndex");
-      const cellDiff = particlePosition.fract().sub(0.5).toConst("cellDiff");
+      const cellIndex = ivec3(particlePosition).sub(1).toConst('cellIndex');
+      const cellDiff = particlePosition.fract().sub(0.5).toConst('cellDiff');
       const w0 = float(0.5).mul(float(0.5).sub(cellDiff)).mul(float(0.5).sub(cellDiff));
       const w1 = float(0.75).sub(cellDiff.mul(cellDiff));
       const w2 = float(0.5).mul(float(0.5).add(cellDiff)).mul(float(0.5).add(cellDiff));
-      const weights = array([w0, w1, w2]).toConst("weights");
+      const weights = array([w0, w1, w2]).toConst('weights');
 
-      const density = float(0).toVar("density");
-      Loop({ start: 0, end: 3, type: "int", name: "gx", condition: "<" }, ({ gx }) => {
-        Loop({ start: 0, end: 3, type: "int", name: "gy", condition: "<" }, ({ gy }) => {
-          Loop({ start: 0, end: 3, type: "int", name: "gz", condition: "<" }, ({ gz }) => {
-            const weight = weights
-              .element(gx)
-              .x.mul(weights.element(gy).y)
-              .mul(weights.element(gz).z);
+      const density = float(0).toVar('density');
+      Loop({ start: 0, end: 3, type: 'int', name: 'gx', condition: '<' }, ({ gx }) => {
+        Loop({ start: 0, end: 3, type: 'int', name: 'gy', condition: '<' }, ({ gy }) => {
+          Loop({ start: 0, end: 3, type: 'int', name: 'gz', condition: '<' }, ({ gz }) => {
+            const weight = weights.element(gx).x.mul(weights.element(gy).y).mul(weights.element(gz).z);
             const cellX = cellIndex.add(ivec3(gx, gy, gz)).toConst();
             const cell = getCell(cellX);
-            density.addAssign(decodeFixedPoint(cell.get("mass")).mul(weight));
+            density.addAssign(decodeFixedPoint(cell.get('mass')).mul(weight));
           });
         });
       });
-      this.particleBuffer.element(instanceIndex).get("density").assign(density);
-    })().compute(1);
+
+      // Smooth density store like legacy
+      const densityStore = this.particleBuffer.element(instanceIndex).get('density');
+      densityStore.assign(mix(densityStore, density, 0.05));
+
+      const volume = float(1).div(density);
+      const pressure = max(float(0), pow(density.div(this.uniforms.restDensity), float(5)).sub(1).mul(this.uniforms.stiffness)).toConst('pressure');
+      const stress = mat3(pressure.negate(), 0, 0, 0, pressure.negate(), 0, 0, 0, pressure.negate()).toVar('stress');
+      const dudv = this.particleBuffer.element(instanceIndex).get('C').toConst('C');
+      const strain = dudv.add(dudv.transpose());
+      stress.addAssign(strain.mul(this.uniforms.dynamicViscosity));
+      const eq16Term0 = volume.mul(-4).mul(stress).mul(this.uniforms.dt);
+
+      Loop({ start: 0, end: 3, type: 'int', name: 'gx', condition: '<' }, ({ gx }) => {
+        Loop({ start: 0, end: 3, type: 'int', name: 'gy', condition: '<' }, ({ gy }) => {
+          Loop({ start: 0, end: 3, type: 'int', name: 'gz', condition: '<' }, ({ gz }) => {
+            const weight = weights.element(gx).x.mul(weights.element(gy).y).mul(weights.element(gz).z);
+            const cellX = cellIndex.add(ivec3(gx, gy, gz)).toConst();
+            const cellDist = vec3(cellX).add(0.5).sub(particlePosition).toConst('cellDist');
+            const cell = getCell(cellX);
+            const momentum = eq16Term0.mul(weight).mul(cellDist).toConst('momentum');
+            atomicAdd(cell.get('x'), encodeFixedPoint(momentum.x));
+            atomicAdd(cell.get('y'), encodeFixedPoint(momentum.y));
+            atomicAdd(cell.get('z'), encodeFixedPoint(momentum.z));
+          });
+        });
+      });
+    })().compute(maxParticles);
 
     this.kernels.updateGrid = Fn(() => {
+      // Switch atomics off for readback (WGSL can't cast atomic<i32> directly)
+      this.cellBuffer.setAtomic("x", false);
+      this.cellBuffer.setAtomic("y", false);
+      this.cellBuffer.setAtomic("z", false);
+      this.cellBuffer.setAtomic("mass", false);
       If(instanceIndex.greaterThanEqual(cellCountUint), () => {
         Return();
       });
@@ -266,8 +303,7 @@ class MlsMpmSimulator {
       const damping = float(1).sub(this.uniforms.dynamicViscosity.mul(dt).mul(40));
       const noise = this.uniforms.noise;
 
-      const normalized = cellVel.normalized().toConst("normalized");
-      const noiseVel = triNoise3Dvec(vec4(normalized.mul(0.05), time.mul(0.1)));
+      const noiseVel = triNoise3Dvec(cellVel.mul(0.05), float(1), time.mul(0.1));
       const noiseControl = this.uniforms.audioBands.toConst("audioBands");
       const noiseMagnitude = noise.mul(0.2).add(noiseControl.y.mul(0.25)).mul(this.uniforms.audioLevel).toConst();
       const noiseVec = noiseVel.mul(noiseMagnitude);
@@ -278,141 +314,125 @@ class MlsMpmSimulator {
     })().compute(cellCount);
 
     this.kernels.g2p = Fn(() => {
-      If(instanceIndex.greaterThanEqual(uint(this.uniforms.numParticles)), () => {
-        Return();
-      });
-      const particlePosition = this.particleBuffer
-        .element(instanceIndex)
-        .get("position")
-        .xyz.toVar("particlePosition");
-      const particleVelocity = this.particleBuffer
-        .element(instanceIndex)
-        .get("velocity")
-        .xyz.toVar("particleVelocity");
+      If(instanceIndex.greaterThanEqual(uint(this.uniforms.numParticles)), () => { Return(); });
 
-      const cellIndex = ivec3(particlePosition).sub(1).toConst("cellIndex");
-      const cellDiff = particlePosition.fract().sub(0.5).toConst("cellDiff");
+      const particleMass = float(1);
+      const particleDensity = this.particleBuffer.element(instanceIndex).get('density').toConst("particleDensity");
+      const particlePosition = this.particleBuffer.element(instanceIndex).get('position').xyz.toVar("particlePosition");
+      const particleVelocity = vec3(0).toVar();
+
+      // Legacy-like initial swirl and outward movement for a more dynamic start
+      const swirl = triNoise3Dvec(particlePosition.mul(0.01), float(0.2), time.mul(0.2)).mul(0.15);
+      particleVelocity.addAssign(swirl);
+
+      If(this.uniforms.gravityType.equal(uint(2)), () => {
+        const pn = particlePosition.div(vec3(this.uniforms.gridSize.sub(1))).sub(0.5).normalize().toConst();
+        particleVelocity.subAssign(pn.mul(0.3).mul(this.uniforms.dt));
+      }).Else(() => {
+        particleVelocity.addAssign(this.uniforms.gravity.mul(this.uniforms.dt));
+      });
+
+      // Add legacy-like curl noise uplift instead of pure damping-only fall
+      const noise = triNoise3Dvec(particlePosition.mul(0.015), float(0.11), time).sub(0.285).normalize().mul(0.28).toVar();
+      particleVelocity.subAssign(noise.mul(this.uniforms.noise).mul(this.uniforms.dt));
+
+      const cellIndex = ivec3(particlePosition).sub(1).toConst('cellIndex');
+      const cellDiff = particlePosition.fract().sub(0.5).toConst('cellDiff');
       const w0 = float(0.5).mul(float(0.5).sub(cellDiff)).mul(float(0.5).sub(cellDiff));
       const w1 = float(0.75).sub(cellDiff.mul(cellDiff));
       const w2 = float(0.5).mul(float(0.5).add(cellDiff)).mul(float(0.5).add(cellDiff));
-      const weights = array([w0, w1, w2]).toConst("weights");
+      const weights = array([w0, w1, w2]).toConst('weights');
 
-      const particleDensity = this.particleBuffer.element(instanceIndex).get("density").x.toConst();
-      const restDensity = this.uniforms.restDensity.toConst();
-      const pressure = max(particleDensity.sub(restDensity), float(0)).mul(this.uniforms.stiffness);
-      const bulkModulus = this.uniforms.stiffness.mul(10);
-      const elasticity = pressure.div(particleDensity.mul(particleDensity.mul(4).add(bulkModulus)));
-
-      const B = mat3().toVar();
-      const particleMass = float(1);
-      const audioBeat = this.uniforms.audioBeat.toConst("audioBeat");
-      const audioBands = this.uniforms.audioBands.toConst("audioBands");
-      const audioLevel = this.uniforms.audioLevel.toConst("audioLevel");
-      const audioFlow = this.uniforms.audioFlow.toConst("audioFlow");
-
-      Loop({ start: 0, end: 3, type: "int", name: "gx", condition: "<" }, ({ gx }) => {
-        Loop({ start: 0, end: 3, type: "int", name: "gy", condition: "<" }, ({ gy }) => {
-          Loop({ start: 0, end: 3, type: "int", name: "gz", condition: "<" }, ({ gz }) => {
-            const weight = weights
-              .element(gx)
-              .x.mul(weights.element(gy).y)
-              .mul(weights.element(gz).z);
+      const B = mat3(0).toVar('B');
+      Loop({ start: 0, end: 3, type: 'int', name: 'gx', condition: '<' }, ({ gx }) => {
+        Loop({ start: 0, end: 3, type: 'int', name: 'gy', condition: '<' }, ({ gy }) => {
+          Loop({ start: 0, end: 3, type: 'int', name: 'gz', condition: '<' }, ({ gz }) => {
+            const weight = weights.element(gx).x.mul(weights.element(gy).y).mul(weights.element(gz).z);
             const cellX = cellIndex.add(ivec3(gx, gy, gz)).toConst();
-            const cell = this.cellBufferF.element(getCellPtr(cellX));
-            const cellVel = cell.xyz.toConst("cellVel");
-            const dist = vec3(cellX).add(0.5).sub(particlePosition).toConst("dist");
-
-            const velocityDiff = cellVel.sub(particleVelocity);
-            const pressureTerm = velocityDiff.mul(elasticity);
-            const flowImpulse = audioFlow.mul(audioLevel).mul(0.5);
-            const beatImpulse = dist
-              .normalized()
-              .mul(audioBeat.mul(0.3).mul(audioLevel));
-            const deltaVelocity = cellVel.add(pressureTerm).add(flowImpulse).add(beatImpulse);
-            particleVelocity.addAssign(deltaVelocity.mul(weight));
-
-            const quadratic = cross(dist, velocityDiff);
-            B.addAssign(velocityDiff.outerProduct(dist).add(quadratic.mul(0.1)).mul(weight));
+            const cellDist = vec3(cellX).add(0.5).sub(particlePosition).toConst('cellDist');
+            const cellPtr = getCellPtr(cellX);
+            const weightedVelocity = this.cellBufferF.element(cellPtr).xyz.mul(weight).toConst('weightedVelocity');
+            const term = mat3(
+              weightedVelocity.mul(cellDist.x),
+              weightedVelocity.mul(cellDist.y),
+              weightedVelocity.mul(cellDist.z)
+            );
+            B.addAssign(term);
+            particleVelocity.addAssign(weightedVelocity);
           });
         });
       });
 
-      const force = particleVelocity.length();
-      const mouseForce = this.uniforms.mouseForce.toConst("mouseForce");
-      particleVelocity.addAssign(mouseForce.mul(0.3).mul(force));
+      const dist = cross(this.uniforms.mouseRayDirection, particlePosition.mul(vec3(1, 1, 0.4)).sub(this.uniforms.mouseRayOrigin)).length();
+      const force = dist.mul(0.1).oneMinus().max(0.0).pow(2);
+      particleVelocity.addAssign(this.uniforms.mouseForce.mul(1).mul(force));
       particleVelocity.mulAssign(particleMass);
 
-      this.particleBuffer.element(instanceIndex).get("C").assign(B.mul(4));
+      this.particleBuffer.element(instanceIndex).get('C').assign(B.mul(4));
       particlePosition.addAssign(particleVelocity.mul(this.uniforms.dt));
       particlePosition.assign(clamp(particlePosition, vec3(2), this.uniforms.gridSize.sub(2)));
 
       const wallStiffness = 0.3;
-      const xN = particlePosition.add(particleVelocity.mul(this.uniforms.dt).mul(3.0)).toConst("xN");
-      const wallMin = vec3(3).toConst("wallMin");
-      const wallMax = vec3(this.uniforms.gridSize).sub(3).toConst("wallMax");
-      If(xN.x.lessThan(wallMin.x), () => {
-        particleVelocity.x.addAssign(wallMin.x.sub(xN.x).mul(wallStiffness));
-      });
-      If(xN.x.greaterThan(wallMax.x), () => {
-        particleVelocity.x.addAssign(wallMax.x.sub(xN.x).mul(wallStiffness));
-      });
-      If(xN.y.lessThan(wallMin.y), () => {
-        particleVelocity.y.addAssign(wallMin.y.sub(xN.y).mul(wallStiffness));
-      });
-      If(xN.y.greaterThan(wallMax.y), () => {
-        particleVelocity.y.addAssign(wallMax.y.sub(xN.y).mul(wallStiffness));
-      });
-      If(xN.z.lessThan(wallMin.z), () => {
-        particleVelocity.z.addAssign(wallMin.z.sub(xN.z).mul(wallStiffness));
-      });
-      If(xN.z.greaterThan(wallMax.z), () => {
-        particleVelocity.z.addAssign(wallMax.z.sub(xN.z).mul(wallStiffness));
-      });
+      const xN = particlePosition.add(particleVelocity.mul(this.uniforms.dt).mul(3.0)).toConst('xN');
+      const wallMin = vec3(3).toConst('wallMin');
+      const wallMax = vec3(this.uniforms.gridSize).sub(3).toConst('wallMax');
+      If(xN.x.lessThan(wallMin.x), () => { particleVelocity.x.addAssign(wallMin.x.sub(xN.x).mul(wallStiffness)); });
+      If(xN.x.greaterThan(wallMax.x), () => { particleVelocity.x.addAssign(wallMax.x.sub(xN.x).mul(wallStiffness)); });
+      If(xN.y.lessThan(wallMin.y), () => { particleVelocity.y.addAssign(wallMin.y.sub(xN.y).mul(wallStiffness)); });
+      If(xN.y.greaterThan(wallMax.y), () => { particleVelocity.y.addAssign(wallMax.y.sub(xN.y).mul(wallStiffness)); });
+      If(xN.z.lessThan(wallMin.z), () => { particleVelocity.z.addAssign(wallMin.z.sub(xN.z).mul(wallStiffness)); });
+      If(xN.z.greaterThan(wallMax.z), () => { particleVelocity.z.addAssign(wallMax.z.sub(xN.z).mul(wallStiffness)); });
 
-      this.particleBuffer.element(instanceIndex).get("position").assign(particlePosition);
-      this.particleBuffer.element(instanceIndex).get("velocity").assign(particleVelocity);
+      this.particleBuffer.element(instanceIndex).get('position').assign(particlePosition);
+      this.particleBuffer.element(instanceIndex).get('velocity').assign(particleVelocity);
 
-      const direction = this.particleBuffer.element(instanceIndex).get("direction");
+      const direction = this.particleBuffer.element(instanceIndex).get('direction');
       direction.assign(mix(direction, particleVelocity, 0.1));
 
-      const audioColorPulse = this.uniforms.audioColorPulse.toConst("audioColorPulse");
-      const hue = particleDensity
-        .div(this.uniforms.restDensity)
-        .mul(0.25)
-        .add(time.mul(0.05))
-        .add(audioBands.z.mul(audioLevel).mul(0.08));
-      const saturationBase = particleVelocity.length().mul(0.5).clamp(0, 1).mul(0.3).add(0.7).add(audioBands.y.mul(audioLevel).mul(0.4));
-      const saturation = clamp(saturationBase, float(0), float(1));
-      const valueBase = force.mul(0.3).add(0.7).add(audioColorPulse.mul(0.4)).add(audioBeat.mul(0.1));
-      const value = clamp(valueBase, float(0), float(1));
-      const color = hsvtorgb(vec3(hue, saturation, value));
-      this.particleBuffer.element(instanceIndex).get("color").assign(color);
-    })().compute(1);
+      const color = hsvtorgb(vec3(particleDensity.div(this.uniforms.restDensity).mul(0.25).add(time.mul(0.05)), particleVelocity.length().mul(0.5).clamp(0, 1).mul(0.3).add(0.7), force.mul(0.3).add(0.7)));
+      this.particleBuffer.element(instanceIndex).get('color').assign(color);
+    })().compute(maxParticles);
+
+    // Ensure compute kernels use the initial particle count before the first update tick
+    if (typeof (this.kernels.p2g1 as any).count === "number") {
+      (this.kernels.p2g1 as any).count = this.numParticles;
+      (this.kernels.p2g2 as any).count = this.numParticles;
+      (this.kernels.g2p as any).count = this.numParticles;
+      (this.kernels.p2g1 as any).updateDispatchCount?.();
+      (this.kernels.p2g2 as any).updateDispatchCount?.();
+      (this.kernels.g2p as any).updateDispatchCount?.();
+    }
   }
 
   setPointer(pointer) {
-    if (!pointer?.active) {
-      return;
-    }
     const origin = pointer.origin.clone().multiplyScalar(64).add(new THREE.Vector3(32, 0, 0));
     this.uniforms.mouseRayDirection.value.copy(pointer.direction.clone().normalize());
     this.uniforms.mouseRayOrigin.value.copy(origin);
-    this.mousePos.copy(pointer.point.clone().multiplyScalar(64));
+    if (pointer.active) {
+      this.mousePos.copy(pointer.point.clone().multiplyScalar(64));
+    }
   }
 
   async update(interval) {
     const params = this.params;
     this.uniforms.noise.value = params.noise;
     this.uniforms.stiffness.value = params.stiffness;
-    this.uniforms.gravityType.value = params.gravity;
-
-    if (params.gravity === 0) {
+    // Legacy-inspired gravity handling
+    const gm = (params as any).gravityMode as PhysicsConfig["gravityMode"] | undefined;
+    if (gm === "back") {
       this.uniforms.gravity.value.set(0, 0, 0.2);
-    } else if (params.gravity === 1) {
+    } else if (gm === "down") {
       this.uniforms.gravity.value.set(0, -0.2, 0);
-    } else if (params.gravity === 3) {
-      this.uniforms.gravity.value.copy(params.gravitySensor).add(params.accelerometer);
+    } else if (gm === "center") {
+      // handled in g2p by gravityType check
+    } else if (gm === "sensor") {
+      this.uniforms.gravity.value.copy((params as any).gravitySensor?.clone?.().add?.((params as any).accelerometer) || new THREE.Vector3());
+    } else {
+      // vector
+      this.uniforms.gravity.value.copy(params.gravityVector);
     }
+    // Ensure numParticles uniform is always in sync
+    this.uniforms.numParticles.value = this.numParticles || params.particleCount;
     this.uniforms.dynamicViscosity.value = params.viscosity;
     this.uniforms.restDensity.value = params.restDensity;
 
@@ -420,11 +440,8 @@ class MlsMpmSimulator {
       this.numParticles = params.particleCount;
       this.uniforms.numParticles.value = params.particleCount;
       this.kernels.p2g1.count = params.particleCount;
-      this.kernels.p2g1.updateDispatchCount();
       this.kernels.p2g2.count = params.particleCount;
-      this.kernels.p2g2.updateDispatchCount();
       this.kernels.g2p.count = params.particleCount;
-      this.kernels.g2p.updateDispatchCount();
     }
 
     interval = Math.min(interval, 1 / 60);
@@ -442,10 +459,8 @@ class MlsMpmSimulator {
         .divideScalar(this.mousePosArray.length);
     }
 
-    if (params.run) {
-      const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
-      await this.renderer.computeAsync(kernels);
-    }
+    const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
+    await this.renderer.computeAsync(kernels);
   }
 
   setAudioProfile(profile) {

@@ -1,7 +1,7 @@
 // @ts-nocheck
 import * as THREE from "three/webgpu";
 import { Fn, vec3, instanceIndex } from "three/tsl";
-import type { ModuleInstance, TickInfo, AppContext, PhysicsService, PointRendererService } from "../context";
+import type { ModuleInstance, TickInfo, AppContext, PhysicsService, PointRendererService } from "../config";
 
 export const createPointRendererModule = (): ModuleInstance => {
   const id = "render.points";
