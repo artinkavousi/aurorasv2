@@ -1,123 +1,97 @@
-# AuroraSV2 Upgrade Proposal
+# AuroraSV2 Upgrade & Refactor Proposal
 
-## Executive Summary
-This proposal outlines a multi-phase upgrade plan to transform AuroraSV2 into a richer, faster, and more immersive real-time experience. The plan focuses on four pillars: performance optimization, visual fidelity, interactive features, and robust audio-reactive systems. Each pillar includes actionable initiatives, recommended tooling, and measurable success criteria to guide implementation.
+## 1. Executive Summary
+AuroraSV2 is moving to a modular, hot-swappable runtime centered on an application context and ESM-first architecture. This proposal distills the Refactor Master Plan into a sequenced delivery roadmap, adds polish tasks for launch quality, and highlights operational guardrails. The goal is to shift from the legacy monolith to a predictable, documented system without disrupting show production.
 
-## Current State Assessment
-- **Rendering stack**: Three.js with WebGPU renderer, HDR environment lighting, bloom post-processing, MLS-MPM particle simulation, and OrbitControls-based camera.
-- **Interactivity**: Pointer raycasting feeds the MLS-MPM simulator for mouse-driven interactions. Basic tweakable configuration through `conf` and `Info` panes.
-- **Visuals**: HDRI-based lighting, bloom, particle/point rendering, and animated lighting rig.
-- **Audio**: No built-in sound reactivity pipeline at present.
-- **Performance considerations**: Deferred post-processing pipeline, dynamic particle updates, but limited batching, LOD, or simulation adaptivity.
+## 2. Guiding Objectives
+- Deliver the architecture described in `docs/refactor-master-plan.md` with every module owned by a clear API surface and lifecycle contract.
+- Preserve visual parity (or better) with current stage presets while enabling runtime swapping of physics, renderers, and audio pipelines.
+- Make the developer workflow type-safe, testable, and ready for automated builds.
+- Document decisions, diagnostics, and hot-swap recipes so future iterations can evolve without rediscovery.
 
-## Goals
-1. **Boost Performance & Stability**: Maintain 60+ FPS on desktop GPUs and target 30+ FPS on capable mobile devices.
-2. **Elevate Visual Fidelity**: Introduce cinematic lighting, material variety, and contextual storytelling elements.
-3. **Deliver Rich Interaction**: Expand input modalities, presets, and shareable states.
-4. **Add Deep Audio Reactivity**: Provide configurable audio-driven modulation across visual and simulation layers.
-5. **Improve Tooling & Maintainability**: Enhance testing, profiling, documentation, and deployment workflows.
+## 3. Current Pain Points
+- Cross-file singletons and ad-hoc module managers make state brittle and difficult to hot-reload.
+- Configuration is scattered across JSON snippets and hard-coded constants, preventing reproducible show presets.
+- Diagnostics are manual (console logs, ad-hoc overlays) making regressions costly to track.
+- Build pipeline lacks strict type coverage and smoke testing, causing regressions to reach stage rehearsals.
 
-## Proposed Enhancements
+## 4. Target Architecture Snapshot
+The new structure (see `docs/refactor-master-plan.md`, sections 2 through 4) defines one module per subsystem with `create*Module()` factories and `init -> ready? -> update -> dispose` lifecycles inside a shared `AppContext`. Key responsibilities:
+- `stage/stage.ts`: Owns the Three.js scene, camera, and environment controls.
+- `audio/audio.ts`: Streams audio inputs, runs FFT/beat detection, and exposes normalized profiles.
+- `physics/mls-mpm.ts`: Handles MLS-MPM simulation and responds to audio and pointer signals.
+- `renders/meshRenderer.ts` and `renders/pointRenderer.ts`: Render surfaces and diagnostics using simulator buffers.
+- `postfx/postfx.ts`: Controls the MRT plus bloom stack and provides render overrides.
+- `io/dashboard.ts` and `diagnostics/perfHud.ts`: Surface metrics and interaction controls backed by the config store.
 
-### 1. Performance Enhancements
-- **GPU Profiling & Budgets**
-  - Integrate WebGPU profiling hooks (e.g., `renderer.info` plus WebGPU capture tools) and establish frame budgets per subsystem.
-  - Automate perf regression testing with scripted camera paths and headless captures.
-- **Simulation Optimizations**
-  - Implement adaptive MLS-MPM grid resolution based on camera distance/importance zones.
-  - Add particle pooling and frustum/occlusion culling for render passes.
-  - Allow compute shader-based simulation steps where WebGPU support is detected.
-- **Renderer Optimizations**
-  - Introduce dynamic resolution scaling and temporal upscaling options.
-  - Use clustered/forward+ lighting for scalable light counts.
-  - Cache bloom prefilters per frame and enable toggleable post-processing quality presets.
-- **Asset & Build Pipeline**
-  - Compress HDRI and textures via Basis/EXR->KTX2.
-  - Employ code-splitting for optional controls (Tweakpane, Info overlays) and lazy-load heavy modules (e.g., MLS-MPM debug views).
+## 5. Workstreams & Deliverables
+### Phase 0 - Foundations
+- Create `config.ts`, `context.ts`, and module registry primitives with strict typing.
+- Set up logging (`commons/logger.ts`) and asset loaders (`commons/assets.ts`).
+- Define the baseline `AppConfig` schema and seed presets (default, performance, showcase).
 
-### 2. Visual Fidelity Upgrades
-- **Lighting & Atmospherics**
-  - Add volumetric light shafts using raymarching nodes or signed distance fields.
-  - Integrate dynamic sky/aurora shaders with procedural noise layers and time-of-day progression.
-- **Material Diversity**
-  - Support hybrid particle rendering: sprites, metaball surfaces via marching cubes, and screen-space fluid rendering for dramatic splashes.
-  - Introduce surface decals and ground-plane parallax effects to anchor the scene.
-- **Camera & Presentation**
-  - Implement guided camera paths, cinematic intro/outro sequences, and keyframe-based transitions.
-  - Add UI controls for aspect ratios, color grading LUTs, and screenshot/video export.
-- **UI/UX Enhancements**
-  - Redesign overlay with minimalistic glassmorphism aesthetic, responsive layout, and contextual tooltips.
-  - Include preset gallery thumbnails and descriptions for quick scene swaps.
+### Phase 1 - Core Systems
+- Port stage creation to `stage/stage.ts` with deterministic init and dispose hooks.
+- Implement WebAudio pipeline in `audio/audio.ts` and connect to the context services layer.
+- Bring the MLS-MPM simulator into `physics/mls-mpm.ts` using `physics/structuredArray.ts` helpers.
 
-### 3. Interaction & Feature Expansion
-- **Input Modalities**
-  - Support multi-touch gestures (pinch, rotate), gamepad control mapping, and optional Leap Motion integration.
-  - Add MIDI/OSC input adapters for live performances.
-- **Preset & State Management**
-  - Build a JSON-based preset system capturing lighting, simulation, and audio mappings.
-  - Enable QR/shareable URLs using query params or hash routing, leveraging Vite dynamic imports for preset bundles.
-- **Collaboration & Live Mode**
-  - Create a “performance mode” with networked control via WebSockets, allowing remote parameter tweaking.
-  - Expose read-only spectator view optimized for streaming with OBS overlays.
+### Phase 2 - Rendering & PostFX
+- Rebuild mesh and point renderers as separate modules consuming physics outputs.
+- Integrate post-processing in `postfx/postfx.ts` with config-driven bloom toggles and overrides.
+- Ensure modules register render overrides via `TickInfo.setRenderOverride` when bloom is active.
 
-### 4. Audio-Reactivity System
-- **Audio Pipeline**
-  - Implement Web Audio API graph with FFT analysis, beat detection, and multi-band envelope followers.
-  - Allow microphone input, local file playback, and live stream sources (WebRTC).
-- **Mapping Layer**
-  - Design a node-based modulation system (e.g., using Tweakpane plugins) to route audio features to scene parameters.
-  - Provide presets for common mappings (bass-driven bloom, midrange particle spawn, treble color shifts).
-- **Visualization Feedback**
-  - Add spectrum analyzers, waveform overlays, and debug monitoring for sound reactivity tuning.
-- **Performance Considerations**
-  - Run analysis in AudioWorklets where supported to avoid UI thread stalls.
-  - Offer quality levels (FFT size, smoothing) and fallback to minimal reactive cues on low-power devices.
+### Phase 3 - UX & Diagnostics
+- Implement the dashboard overlay with live metrics, toggles, and preset switching.
+- Add the performance HUD canvas and tie sampling to the render loop.
+- Produce how-to guides for module swaps and diagnostics usage.
 
-### 5. Tooling, Testing, and Deployment
-- **Developer Tooling**
-  - Add ESLint + Prettier, TypeScript migration roadmap, and automated lint/test scripts.
-  - Introduce Storybook or isolated playgrounds for shaders/materials.
-- **Testing & CI/CD**
-  - Configure CI for build, lint, and WebGL/WebGPU smoke tests using headless Chromium.
-  - Add visual regression testing via Playwright screenshots against golden baselines.
-- **Documentation & Knowledge Sharing**
-  - Expand docs with architecture diagrams, shader overviews, and “how-to” guides for presets and audio mappings.
-  - Record short Loom-style walkthroughs embedded in docs for onboarding.
-- **Deployment & Distribution**
-  - Create staging/production pipelines with Vercel/Netlify, including feature flag toggles.
-  - Package desktop kiosk builds using Electron/Tauri for installations.
+### Phase 4 - Hardening & Polish
+- Sweep for `// @ts-nocheck` usage and replace with typed definitions where feasible.
+- Add smoke tests for module lifecycle (init, update, dispose) and configuration persistence.
+- Script a baseline profiling pass (camera orbit plus audio playlist) and capture metrics.
 
-## Roadmap & Milestones
-1. **Phase 0 – Foundations (Weeks 1-2)**
-   - Set up linting/formatting, profiling tools, and documentation scaffolding.
-   - Audit current performance metrics to establish baselines.
-2. **Phase 1 – Performance & Stability (Weeks 3-6)**
-   - Implement adaptive simulation, culling, and post-processing quality presets.
-   - Integrate automated performance regression tests.
-3. **Phase 2 – Visual & UI Refresh (Weeks 5-9)**
-   - Deploy new UI design, camera presets, and enhanced lighting/atmospherics.
-   - Add material variety and screen-space effects.
-4. **Phase 3 – Audio Reactivity (Weeks 8-12)**
-   - Build audio pipeline, mapping system, and preset library.
-   - Expose controls via revamped UI and document workflows.
-5. **Phase 4 – Interaction & Live Features (Weeks 11-16)**
-   - Add advanced input support, collaboration mode, and sharing features.
-   - Prepare performance mode tooling and network control surfaces.
-6. **Phase 5 – Polish & Release (Weeks 15-18)**
-   - Conduct user testing, refine presets, and finalize documentation.
-   - Launch updated experience with marketing assets (videos, social content).
+## 6. Milestones & Acceptance Gates
+- **M1: Context & Config Ready** - `npm run build` passes with new `main.ts` bootstrapping the registry, legacy bootstrap removed.
+- **M2: Core Modules Online** - Stage, audio, and physics modules update together without runtime errors; config toggles propagate.
+- **M3: Visual Parity** - Mesh renderer, postFX, and presets replicate current showcase visuals within +/- 5 percent frame time variance.
+- **M4: Diagnostics Complete** - Dashboard controls, perf HUD, and logging documented; profiling script produces baseline CSV or log.
+- **M5: Release Candidate** - `npm run build`, `npm run typecheck`, and smoke tests succeed on CI; upgrade checklist signed off.
 
-## Success Metrics
-- Maintain >= 90th percentile frame time under 16.6 ms on target hardware profiles.
-- Increase average session duration and preset usage via analytics instrumentation.
-- Achieve positive qualitative feedback on visual/audio immersion from beta testers.
-- Deliver comprehensive documentation coverage (>90% modules) and onboarding satisfaction.
+## 7. Testing Strategy
+- **Static**: Enforce strict TypeScript config, ESLint, and Prettier; ban unchecked `any` casts on new modules.
+- **Unit**: Module-level lifecycle tests (init, update, dispose) using lightweight harnesses.
+- **Integration**: Headless render pipeline smoke runs verifying stage, physics, and renderer interplay.
+- **Performance**: Record FPS and budget metrics via perf HUD logging during scripted scene runs.
+- **Regression**: Hot-swap drills replacing renderer or physics modules mid-session to ensure context cleanup works.
 
-## Risks & Mitigations
-- **WebGPU Browser Support**: Provide WebGL fallback paths and progressive enhancement.
-- **Audio Input Permissions**: Offer clear UX prompts and fallback to preloaded tracks.
-- **Complexity Creep**: Enforce milestone scoping, use feature flags, and maintain modular architecture.
-- **Performance Regression**: Leverage CI performance tests and maintain baseline comparison dashboards.
+## 8. Tooling & Workflow Updates
+- Add npm scripts for `typecheck`, `lint`, `test:smoke`, and `profile:record` (future Playwright integration).
+- Wire CI (GitHub Actions or Azure Pipelines) to run build, typecheck, and lint on every PR; attach perf log artifacts on nightly runs.
+- Document the module template (factory signature, context usage, dispose contract) in `/docs` for contributors.
+- Adopt conventional commits or similar to track feature readiness per milestone.
 
-## Conclusion
-By executing this roadmap, AuroraSV2 can evolve into a high-performance, visually stunning, and sonically immersive experience suitable for live shows, installations, and online showcases. The proposal balances ambitious feature growth with pragmatic engineering practices to ensure long-term maintainability and scalability.
+## 9. Risk Register & Mitigations
+- **WebGPU availability**: Provide WebGL fallback or guard rails; detect capability before bootstrapping.
+- **MLS-MPM performance**: Profile shader compilation and consider workerization if average frame cost exceeds 5 milliseconds.
+- **Audio input variability**: Supply mocked audio sources for testing and fallback loops for demos.
+- **Config drift**: Lock presets via schema versioning and add migration helpers when shape changes.
+- **Team bandwidth**: Timebox each phase with clear exit criteria; avoid parallelizing beyond module boundaries.
+
+## 10. Open Questions
+- Do we need legacy scene compatibility layers for archived shows?
+- Should the dashboard expose granular shader tuning or stay on curated toggles?
+- What timeline exists for workerizing physics or audio, and do we reserve hooks now or later?
+- Are there external stakeholders (show operators) requiring training sessions or documentation updates?
+
+## 11. Implementation Checklist
+- [ ] Legacy bootstrap removed and `main.ts` owns lifecycle.
+- [ ] Config store persisted with presets documented.
+- [ ] All modules implement the `create*Module` contract with typed surfaces.
+- [ ] Dashboard plus perf HUD online with recorded baselines.
+- [ ] Lint, typecheck, and smoke tests wired into CI.
+- [ ] Release notes plus upgrade guide drafted for operators.
+
+## 12. References
+- `docs/refactor-master-plan.md` - canonical architecture and module contracts.
+- `src/main.ts` - new bootstrap entry point (in progress).
+- `src/postfx/postfx.ts`, `src/app.js` - legacy versus target implementations for cross-checking during migration.
