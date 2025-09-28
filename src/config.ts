@@ -38,6 +38,7 @@ export interface PhysicsConfig {
   workerEnabled: boolean;
   fixedTimestep: number;
   iterations: number;
+  maxSubsteps: number;
   stiffness: number;
   density: number;
   restDensity: number;
@@ -45,12 +46,25 @@ export interface PhysicsConfig {
   gravity: Vector3Tuple;
   gravitySensor: Vector3Tuple;
   accelerometer: Vector3Tuple;
+  gridResolution: number;
+  minGridResolution: number;
+  maxGridResolution: number;
+  adaptiveEnabled: boolean;
+  adaptiveTargetFrameMs: number;
+  pointerForce: number;
+  pointerFalloff: number;
+  turbulence: number;
+  lodNear: number;
+  lodFar: number;
 }
 
 export interface RenderConfig {
   mode: "mesh" | "points" | "hybrid";
   size: number;
   bloomMask: number;
+  lodMeshRatio: number;
+  pointSizeMin: number;
+  pointSizeMax: number;
 }
 
 export interface PostFxConfig {
@@ -152,6 +166,7 @@ export const defaultConfig: AppConfig = {
     workerEnabled: false,
     fixedTimestep: 1 / 120,
     iterations: 3,
+    maxSubsteps: 4,
     stiffness: 3,
     density: 1,
     restDensity: 1,
@@ -159,11 +174,24 @@ export const defaultConfig: AppConfig = {
     gravity: [0, -0.8, 0],
     gravitySensor: [0, 0, 0],
     accelerometer: [0, 0, 0],
+    gridResolution: 64,
+    minGridResolution: 48,
+    maxGridResolution: 96,
+    adaptiveEnabled: true,
+    adaptiveTargetFrameMs: 12,
+    pointerForce: 1.5,
+    pointerFalloff: 0.08,
+    turbulence: 0.35,
+    lodNear: 18,
+    lodFar: 36,
   },
   render: {
     mode: "mesh",
     size: 1,
     bloomMask: 1,
+    lodMeshRatio: 0.35,
+    pointSizeMin: 0.35,
+    pointSizeMax: 1.2,
   },
   postfx: {
     bloom: true,
