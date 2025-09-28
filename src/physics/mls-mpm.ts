@@ -304,8 +304,11 @@ class MlsMpmSimulator {
       const noise = this.uniforms.noise;
 
       const noiseVel = triNoise3Dvec(cellVel.mul(0.05), float(1), time.mul(0.1));
-      const noiseControl = this.uniforms.audioBands.toConst("audioBands");
-      const noiseMagnitude = noise.mul(0.2).add(noiseControl.y.mul(0.25)).mul(this.uniforms.audioLevel).toConst();
+      const audioBands = this.uniforms.audioBands.toConst("audioBands");
+      // Base noise from slider (independent of audio), plus optional audio-driven boost
+      const baseNoiseMag = this.uniforms.noise.mul(0.2);
+      const audioNoiseMag = audioBands.y.mul(0.25).mul(this.uniforms.audioLevel);
+      const noiseMagnitude = baseNoiseMag.add(audioNoiseMag).toConst();
       const noiseVec = noiseVel.mul(noiseMagnitude);
 
       const newVel = cellVel.mul(damping).add(gravityForce.mul(dt)).add(noiseVec.mul(dt));
@@ -367,9 +370,9 @@ class MlsMpmSimulator {
       });
 
       const dist = cross(this.uniforms.mouseRayDirection, particlePosition.mul(vec3(1, 1, 0.4)).sub(this.uniforms.mouseRayOrigin)).length();
-      const force = dist.mul(0.1).oneMinus().max(0.0).pow(2);
-      // reduce mouse force magnitude to avoid pushing particles hard toward corners
-      particleVelocity.addAssign(this.uniforms.mouseForce.mul(0.6).mul(force));
+      // Wider influence and stronger push
+      const force = dist.mul(0.05).oneMinus().max(0.0).pow(2);
+      particleVelocity.addAssign(this.uniforms.mouseForce.mul(2.2).mul(force));
       particleVelocity.mulAssign(particleMass);
 
       this.particleBuffer.element(instanceIndex).get('C').assign(B.mul(4));
@@ -424,14 +427,18 @@ class MlsMpmSimulator {
     // Legacy-inspired gravity handling
     const gm = (params as any).gravityMode as PhysicsConfig["gravityMode"] | undefined;
     if (gm === "back") {
-      // pull gently toward -Z to keep fluid centered, not corner-biased
-      this.uniforms.gravity.value.set(0, 0, -0.2);
+      // pull toward -Z (into the screen) in grid units
+      this.uniforms.gravity.value.set(0, 0, -0.6);
     } else if (gm === "down") {
-      this.uniforms.gravity.value.set(0, -0.2, 0);
+      // stronger downward gravity
+      this.uniforms.gravity.value.set(0, -1.0, 0);
     } else if (gm === "center") {
       // handled in g2p by gravityType check
     } else if (gm === "sensor") {
-      this.uniforms.gravity.value.copy((params as any).gravitySensor).add((params as any).accelerometer);
+      this.uniforms.gravity.value
+        .copy((params as any).gravitySensor)
+        .add((params as any).accelerometer)
+        .multiplyScalar(1.5);
     } else {
       // vector
       this.uniforms.gravity.value.copy(params.gravityVector);

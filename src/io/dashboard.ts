@@ -438,7 +438,7 @@ export const createDashboardModule = (): ModuleInstance => {
       fPhys.addBinding(physicsModel, "viscosity", { min: 0, max: 2, step: 0.01 }).on("change", (ev: any) => context.config.patch({ physics: { viscosity: Number(ev.value) } }));
 
       // Additional legacy-like controls
-      fPhys.addBinding(physicsModel, "noise", { min: 0, max: 2, step: 0.01 }).on("change", (ev: any) => context.config.patch({ physics: { noise: Number(ev.value) } }));
+      fPhys.addBinding(physicsModel, "noise", { min: 0, max: 2, step: 0.01, label: "noise" }).on("change", (ev: any) => context.config.patch({ physics: { noise: Number(ev.value) } }));
       fPhys.addBinding(physicsModel, "particleCount", { min: 4096, max: config.physics.maxParticles, step: 4096, label: "Particles" }).on("change", (ev: any) => context.config.patch({ physics: { particleCount: Number(ev.value) } }));
 
       const fGrav = physicsPane.addFolder({ title: "Gravity" });
