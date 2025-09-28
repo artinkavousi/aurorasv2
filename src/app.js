@@ -1,19 +1,15 @@
-import * as THREE from 'three/webgpu';
-// Optional helpers pulled from PR #5
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
-import { RGBELoader } from 'three/examples/jsm/loaders/RGBELoader.js';
-import { Lights } from './lights';
-import { conf } from './conf';
-import { Info } from './info';
-import ModuleManager from './core/moduleManager';
-import EnvironmentModule from './modules/environmentModule';
-import ControlsModule from './modules/controlsModule';
-import LightingModule from './modules/lightingModule';
-import BackgroundModule from './modules/backgroundModule';
-import SimulationModule from './modules/simulationModule';
-import PostProcessingModule from './modules/postProcessingModule';
-import SoundReactivity from './audio/soundReactivity';
-import hdri from './assets/autumn_field_puresky_1k.hdr';
+import * as THREE from "three/webgpu";
+import { conf } from "./conf";
+import { Info } from "./info";
+import ModuleManager from "./core/moduleManager";
+import EnvironmentModule from "./modules/environmentModule";
+import ControlsModule from "./modules/controlsModule";
+import LightingModule from "./modules/lightingModule";
+import BackgroundModule from "./modules/backgroundModule";
+import SimulationModule from "./modules/simulationModule";
+import PostProcessingModule from "./modules/postProcessingModule";
+import SoundReactivityModule from "./modules/soundReactivityModule";
+import hdri from "./assets/autumn_field_puresky_1k.hdr";
 // Optional physics/rendering module factories (from PR #5)
 import createMlsMpmModule from './physics/modules/mlsMpmModule';
 import createParticleSurfaceRendererModule from './rendering/modules/particleSurfaceRendererModule';
@@ -55,7 +51,7 @@ class App {
 
         // Initialize optional sound reactivity (from PR #4)
         try {
-            this.soundReactivity = new SoundReactivity();
+            this.soundReactivity = new SoundReactivityModule();
             await this.soundReactivity.init();
             conf.attachSoundReactivity?.(this.soundReactivity);
         } catch (e) {
@@ -94,8 +90,8 @@ class App {
 
         // Add default lights if available (from PR #5)
         try {
-            if (typeof Lights !== 'undefined') {
-                this.lights = new Lights();
+            if (typeof LightingModule !== 'undefined') {
+                this.lights = new LightingModule();
                 if (this.scene && this.lights.object) this.scene.add(this.lights.object);
             }
         } catch (e) {
@@ -104,8 +100,8 @@ class App {
 
         // Setup OrbitControls (optional)
         try {
-            if (typeof OrbitControls !== 'undefined' && this.renderer?.domElement) {
-                this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+            if (typeof ControlsModule !== 'undefined' && this.renderer?.domElement) {
+                this.controls = new ControlsModule(this.camera, this.renderer.domElement);
                 this.controls.target.set(0, 0.5, 0.2);
                 this.controls.enableDamping = true;
                 this.controls.enablePan = false;
@@ -118,7 +114,8 @@ class App {
         this.moduleManager.registerModule(new ControlsModule());
         this.moduleManager.registerModule(new LightingModule());
         this.moduleManager.registerModule(new BackgroundModule());
-        this.moduleManager.registerModule(new SimulationModule());
+        this.moduleManager.registerModule(new SimulationModule({ pointerListenerTarget: this.renderer.domElement }));
+        this.moduleManager.registerModule(new SoundReactivityModule());
         this.moduleManager.registerModule(new PostProcessingModule());
 
         const autoModules = this.moduleManager.getAutoStartModules?.() ?? [];
@@ -168,15 +165,13 @@ class App {
         const frameContext = this.moduleManager
             ? await this.moduleManager.update(delta, elapsed)
             : { renderOverride: null };
+
         if (frameContext.renderOverride) {
             await frameContext.renderOverride.fn(frameContext);
+        } else if (this.services.postProcessing?.pipeline) {
+            await this.services.postProcessing.pipeline.renderAsync();
         } else {
-            // Some projects expose a post-processing module with renderScene()
-            if (this.services.postProcessing?.renderScene) {
-                await this.services.postProcessing.renderScene();
-            } else if (this.moduleManager && this.moduleManager.renderScene) {
-                await this.moduleManager.renderScene?.();
-            }
+            await this.renderer.renderAsync(this.scene, this.camera);
         }
 
         conf.end();
