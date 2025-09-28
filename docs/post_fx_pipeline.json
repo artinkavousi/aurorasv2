@@ -1,0 +1,222 @@
+{
+  "pipeline": [
+    {
+      "step_number": 1,
+      "operation": "Preprocess",
+      "node": "LuminancePrefilter",
+      "parameters": {
+        "exposureCompensation": 0.0,
+        "maxLuma": 32.0,
+        "toneMap": "aces"
+      },
+      "validation": "Histogram remains unclipped; dynamic range preserved for downstream bloom."
+    },
+    {
+      "step_number": 2,
+      "operation": "Blur",
+      "node": "HashBlur",
+      "parameters": {
+        "radius": 18.0,
+        "iterations": 3,
+        "directionalMode": "pyramid",
+        "tileSize": 16
+      },
+      "validation": "Edge detail is sufficiently softened while cost stays under 1.5ms at 1440p."
+    },
+    {
+      "step_number": 3,
+      "operation": "Mask",
+      "node": "RadialMaskNode",
+      "parameters": {
+        "center": [0.5, 0.5],
+        "innerRadius": 0.18,
+        "outerRadius": 0.62,
+        "falloff": "smoothstep"
+      },
+      "validation": "Blend map shows crisp center with gradual falloff; no banding in 10-bit buffer."
+    },
+    {
+      "step_number": 4,
+      "operation": "Composite",
+      "node": "MaskedMixNode",
+      "parameters": {
+        "foreground": "sceneColor",
+        "background": "blurOutput",
+        "mask": "radialMask"
+      },
+      "validation": "Focus plane remains tack sharp; periphery fully transitions to blur without halos."
+    },
+    {
+      "step_number": 5,
+      "operation": "Chromatic Aberration",
+      "node": "ChromaticAberrationNode",
+      "parameters": {
+        "mode": "RGBShift",
+        "maxOffset": [1.6, -1.4],
+        "scaleByMask": true,
+        "dispersionCurve": "quadratic"
+      },
+      "validation": "CA ramps up smoothly toward edges; center remains neutral with <0.2px drift."
+    },
+    {
+      "step_number": 6,
+      "operation": "Bloom",
+      "node": "BloomNode",
+      "parameters": {
+        "threshold": 0.82,
+        "intensity": 0.9,
+        "knee": 0.6,
+        "iterations": 5,
+        "bicubicUpsample": true
+      },
+      "validation": "Highlight roll-off is clean; bloom halo respects focus mask and avoids clipping."
+    },
+    {
+      "step_number": 7,
+      "operation": "Lens Streaks",
+      "node": "AnamorphicNode",
+      "parameters": {
+        "enabled": true,
+        "orientation": 0.0,
+        "stretch": 2.4,
+        "threshold": 0.88,
+        "intensity": 0.35
+      },
+      "validation": "Horizontal streaks appear only on bright sources; no cross-talk with CA fringes."
+    },
+    {
+      "step_number": 8,
+      "operation": "Temporal Smoothing",
+      "node": "TRAANode",
+      "parameters": {
+        "feedback": 0.08,
+        "clamp": 0.12,
+        "motionVectors": "hdrMotionTex"
+      },
+      "validation": "Temporal shimmer is reduced while preserving motion detail; ghosting <5%."
+    }
+  ],
+  "control_panels": {
+    "Focus Controls": {
+      "Center X": {
+        "type": "slider",
+        "range": [0.0, 1.0],
+        "default": 0.5,
+        "binds": "RadialMaskNode.center.x"
+      },
+      "Center Y": {
+        "type": "slider",
+        "range": [0.0, 1.0],
+        "default": 0.5,
+        "binds": "RadialMaskNode.center.y"
+      },
+      "Focus Radius": {
+        "type": "range",
+        "range": [0.05, 0.6],
+        "default": 0.18,
+        "binds": "RadialMaskNode.innerRadius"
+      },
+      "Focus Falloff": {
+        "type": "range",
+        "range": [0.1, 1.0],
+        "default": 0.44,
+        "binds": "RadialMaskNode.outerRadius"
+      }
+    },
+    "Blur Tuning": {
+      "Blur Radius": {
+        "type": "range",
+        "range": [6, 32],
+        "default": 18,
+        "binds": "HashBlur.radius"
+      },
+      "Blur Quality": {
+        "type": "dropdown",
+        "options": ["fast", "balanced", "cinematic"],
+        "default": "balanced",
+        "binds": {
+          "fast": {"iterations": 2, "tileSize": 24},
+          "balanced": {"iterations": 3, "tileSize": 16},
+          "cinematic": {"iterations": 4, "tileSize": 12}
+        }
+      }
+    },
+    "Chromatic Aberration": {
+      "Intensity": {
+        "type": "range",
+        "range": [0.0, 2.5],
+        "default": 1.0,
+        "binds": "ChromaticAberrationNode.maxOffsetScale"
+      },
+      "Curve Bias": {
+        "type": "range",
+        "range": [0.0, 2.0],
+        "default": 1.0,
+        "binds": "ChromaticAberrationNode.dispersionCurve"
+      }
+    },
+    "Bloom": {
+      "Threshold": {
+        "type": "range",
+        "range": [0.5, 1.2],
+        "default": 0.82,
+        "binds": "BloomNode.threshold"
+      },
+      "Intensity": {
+        "type": "range",
+        "range": [0.2, 2.0],
+        "default": 0.9,
+        "binds": "BloomNode.intensity"
+      },
+      "Soft Knee": {
+        "type": "range",
+        "range": [0.1, 1.0],
+        "default": 0.6,
+        "binds": "BloomNode.knee"
+      }
+    },
+    "Lens FX": {
+      "Streak Toggle": {
+        "type": "switch",
+        "default": true,
+        "binds": "AnamorphicNode.enabled"
+      },
+      "Streak Intensity": {
+        "type": "range",
+        "range": [0.0, 1.0],
+        "default": 0.35,
+        "binds": "AnamorphicNode.intensity"
+      }
+    },
+    "Temporal": {
+      "Stability": {
+        "type": "range",
+        "range": [0.0, 0.2],
+        "default": 0.08,
+        "binds": "TRAANode.feedback"
+      },
+      "Clamp": {
+        "type": "range",
+        "range": [0.05, 0.3],
+        "default": 0.12,
+        "binds": "TRAANode.clamp"
+      }
+    }
+  },
+  "performance_considerations": {
+    "renderScale": "Allow internal render at 0.85x when GPU time exceeds 8ms, upscale with FSR2 for parity.",
+    "asynchronousCompute": "Schedule HashBlur and Bloom downsample passes on async compute queue to overlap with lighting resolve.",
+    "sharedBuffers": "Reuse mip-chain buffers between blur and bloom to minimize VRAM footprint.",
+    "physicsIntegration": "Expose camera depth-of-field focal plane from physics-based focus solver; update radial mask center based on tracked object pose."
+  },
+  "error_handling": {
+    "fallbacks": "If ChromaticAberrationNode unsupported, degrade to single-pass RGB split shader.",
+    "clamping": "Clamp user-driven offsets to avoid sampling outside render target.",
+    "temporalReset": "Reset TRAA history on camera cuts or velocity buffer loss.",
+    "validation": "Run GPU capability check before enabling async compute path; log warnings on fallback."
+  },
+  "input_output_spec": {
+    "input_format": "Linear or HDR10 RGBA scene color texture at full resolution with motion vectors, depth, and luminance histogram buffers.",
+    "output_format": "Tone-mapped RGBA texture with selective focus blur, edge chromatic aberration, bloom, optional lens streaks, and temporal smoothing applied."
+  }
+}

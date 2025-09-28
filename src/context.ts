@@ -150,6 +150,8 @@ export interface PostFxService {
   pipeline: THREE.PostProcessing;
   bloomPass: unknown;
   scenePass: unknown;
+  lensPass?: unknown;
+  temporalNode?: unknown;
 }
 
 export interface DashboardService {
