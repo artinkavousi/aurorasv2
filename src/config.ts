@@ -43,6 +43,8 @@ export interface PhysicsConfig {
   density: number;
   restDensity: number;
   viscosity: number;
+  // Legacy-like gravity behavior selector
+  gravityMode?: "back" | "down" | "center" | "sensor" | "vector";
   gravity: Vector3Tuple;
   gravitySensor: Vector3Tuple;
   accelerometer: Vector3Tuple;
@@ -171,6 +173,7 @@ export const defaultConfig: AppConfig = {
     density: 1,
     restDensity: 1,
     viscosity: 0.1,
+    gravityMode: "back",
     gravity: [0, -0.8, 0],
     gravitySensor: [0, 0, 0],
     accelerometer: [0, 0, 0],
@@ -373,3 +376,8 @@ export const createConfigStore = (options: ConfigStoreOptions = {}): ConfigStore
 export const resetConfigStore = (store: ConfigStore) => {
   store.replace(defaultConfig);
 };
+
+// Unified exports: consolidate context and stage interfaces under config
+// Consumers can import AppContext, ModuleRegistry, services, and stage module from this file
+export * from "./context";
+export { createStageModule } from "./stage/stage";

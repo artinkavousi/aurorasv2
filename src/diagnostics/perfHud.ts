@@ -1,4 +1,4 @@
-import type { ModuleInstance, TickInfo, AppContext, PerfHudService } from "../context";
+import type { ModuleInstance, TickInfo, AppContext, PerfHudService } from "../config";
 
 interface PerfHudState {
   canvas: HTMLCanvasElement | null;

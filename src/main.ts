@@ -1,7 +1,5 @@
 import * as THREE from "three/webgpu";
-import { createConfigStore } from "./config";
-import { createAppContext, ModuleRegistry } from "./context";
-import { createStageModule } from "./stage/stage";
+import { createConfigStore, createAppContext, ModuleRegistry, createStageModule } from "./config";
 import { createAudioModule } from "./audio/audio";
 import { createMlsMpmModule } from "./physics/mls-mpm";
 import { createMeshRendererModule } from "./renders/meshRenderer";

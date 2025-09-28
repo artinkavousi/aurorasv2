@@ -57,7 +57,7 @@ export class StructuredArray {
     this.floatArray = new Float32Array(this.structSize * this.length);
     this.intArray = new Int32Array(this.floatArray.buffer);
     this.structNode = struct(this.layout);
-    this.buffer = instancedArray(this.floatArray, this.structNode).label(label);
+    this.buffer = instancedArray(this.floatArray, this.structNode).setName(label);
   }
 
   setAtomic(element: string, value: boolean) {
@@ -114,6 +114,18 @@ export class StructuredArray {
 
   get(index: number, element: string) {
     return this.buffer.element(index).get(element);
+  }
+
+  commit() {
+    const value = (this.buffer as any).value;
+    if (value) {
+      if (typeof value === 'object' && 'needsUpdate' in value) {
+        (value as any).needsUpdate = true;
+      }
+      if (typeof (value as any).version === 'number') {
+        (value as any).version += 1;
+      }
+    }
   }
 
   private parseLayout(layout: LayoutDescription): { layout: ParsedLayout; structSize: number } {
