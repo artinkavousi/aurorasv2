@@ -2,60 +2,122 @@ import * as THREE from "three/webgpu";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 
+type AssetEntry =
+  | { kind: "url"; value: string }
+  | { kind: "raw"; value: string };
+
 const assetModules = import.meta.glob("../assets/**/*", {
   eager: true,
   import: "default",
 }) as Record<string, string>;
 
-const assetUrlLookup = new Map<string, string>();
+const assetLookup = new Map<string, AssetEntry>();
+const externalAssetEntries = new Map<string, AssetEntry>();
 
 const normalizePath = (value: string) => value.replace(/\\/g, "/");
 
-const registerAssetUrl = (key: string, url: string) => {
+const isLikelyUrl = (value: string) =>
+  /^https?:\/\//.test(value) ||
+  value.startsWith("data:") ||
+  value.startsWith("blob:") ||
+  value.startsWith("/") ||
+  value.startsWith("./") ||
+  value.startsWith("../");
+
+const createAssetEntry = (key: string, value: string): AssetEntry => {
+  const extension = key.split(".").pop()?.toLowerCase();
+  if (extension === "obj" && !isLikelyUrl(value) && value.includes("\n")) {
+    return { kind: "raw", value };
+  }
+  return { kind: "url", value };
+};
+
+const addAlias = (aliases: Set<string>, candidate: string) => {
+  if (candidate.length > 0) {
+    aliases.add(candidate);
+  }
+};
+
+const registerAsset = (key: string, rawValue: string) => {
   const normalizedKey = normalizePath(key);
-  const withoutPrefix = normalizedKey.replace(/^(\.\.\/)?assets\//, "");
+  const value = String(rawValue);
+  const entry = createAssetEntry(normalizedKey, value);
+
+  const withoutLeadingDots = normalizedKey.replace(/^\.\//, "").replace(/^(\.\.\/)+/, "");
+  const withoutPrefix = normalizedKey.replace(/^(?:\.\.\/)?assets\//, "");
   const basename = withoutPrefix.split("/").pop() ?? withoutPrefix;
-  assetUrlLookup.set(normalizedKey, url);
-  assetUrlLookup.set(withoutPrefix, url);
-  assetUrlLookup.set(`assets/${withoutPrefix}`, url);
-  assetUrlLookup.set(`../assets/${withoutPrefix}`, url);
-  assetUrlLookup.set(basename, url);
+
+  const aliases = new Set<string>();
+  addAlias(aliases, normalizedKey);
+  addAlias(aliases, withoutLeadingDots);
+  addAlias(aliases, withoutPrefix);
+  addAlias(aliases, basename);
+  if (withoutPrefix.length > 0) {
+    addAlias(aliases, `assets/${withoutPrefix}`);
+    addAlias(aliases, `../assets/${withoutPrefix}`);
+  }
+
+  for (const alias of aliases) {
+    assetLookup.set(alias, entry);
+  }
 };
 
 for (const [key, url] of Object.entries(assetModules)) {
-  registerAssetUrl(key, url);
+  registerAsset(key, url);
 }
 
-const resolveAssetUrl = (path: string): string => {
-  if (/^https?:\/\//.test(path) || path.startsWith("data:")) {
-    return path;
+const resolveAssetEntry = (path: string): AssetEntry => {
+  if (isLikelyUrl(path)) {
+    let entry = externalAssetEntries.get(path);
+    if (!entry) {
+      entry = { kind: "url", value: path };
+      externalAssetEntries.set(path, entry);
+    }
+    return entry;
   }
-  const normalized = normalizePath(path).replace(/^\.\//, "").replace(/^\/+/, "");
-  const direct = assetUrlLookup.get(normalized);
-  if (direct) {
-    return direct;
+
+  const normalized = normalizePath(path);
+  const withoutLeadingDots = normalized.replace(/^\.\//, "").replace(/^(\.\.\/)+/, "");
+  const withoutPrefix = normalized.replace(/^(?:\.\.\/)?assets\//, "");
+  const basename = withoutPrefix.split("/").pop() ?? withoutPrefix;
+
+  const candidates = new Set<string>();
+  addAlias(candidates, normalized);
+  addAlias(candidates, withoutLeadingDots);
+  addAlias(candidates, withoutPrefix);
+  addAlias(candidates, basename);
+  if (withoutPrefix.length > 0) {
+    addAlias(candidates, `assets/${withoutPrefix}`);
+    addAlias(candidates, `../assets/${withoutPrefix}`);
   }
-  const fallback = assetUrlLookup.get(normalized.split("/").pop() ?? normalized);
-  if (fallback) {
-    return fallback;
+
+  for (const candidate of candidates) {
+    const entry = assetLookup.get(candidate);
+    if (entry) {
+      return entry;
+    }
   }
+
   throw new Error(`[assets] Unknown asset: ${path}`);
 };
 
-const hdriCache = new Map<string, Promise<THREE.DataTexture>>();
-const textureCache = new Map<string, Promise<THREE.Texture>>();
-const objCache = new Map<string, Promise<THREE.Group>>();
+const hdriCache = new Map<AssetEntry, Promise<THREE.DataTexture>>();
+const textureCache = new Map<AssetEntry, Promise<THREE.Texture>>();
+const objCache = new Map<AssetEntry, Promise<THREE.Group>>();
 
 const rgbLoader = new RGBELoader();
 const textureLoader = new THREE.TextureLoader();
 const objLoader = new OBJLoader();
 
 export const loadHdri = (path: string): Promise<THREE.DataTexture> => {
-  const url = resolveAssetUrl(path);
-  if (!hdriCache.has(url)) {
+  const entry = resolveAssetEntry(path);
+  if (entry.kind !== "url") {
+    throw new Error(`[assets] HDR must be referenced by URL: ${path}`);
+  }
+  if (!hdriCache.has(entry)) {
     const promise = new Promise<THREE.DataTexture>((resolve, reject) => {
       rgbLoader.load(
-        url,
+        entry.value,
         (texture) => {
           texture.mapping = THREE.EquirectangularReflectionMapping;
           resolve(texture);
@@ -64,9 +126,9 @@ export const loadHdri = (path: string): Promise<THREE.DataTexture> => {
         reject
       );
     });
-    hdriCache.set(url, promise);
+    hdriCache.set(entry, promise);
   }
-  return hdriCache.get(url)!;
+  return hdriCache.get(entry)!;
 };
 
 export interface TextureOptions {
@@ -96,11 +158,14 @@ const applyTextureOptions = (texture: THREE.Texture, options: TextureOptions) =>
 };
 
 export const loadTexture = (path: string, options: TextureOptions = {}): Promise<THREE.Texture> => {
-  const url = resolveAssetUrl(path);
-  if (!textureCache.has(url)) {
+  const entry = resolveAssetEntry(path);
+  if (entry.kind !== "url") {
+    throw new Error(`[assets] Texture must be referenced by URL: ${path}`);
+  }
+  if (!textureCache.has(entry)) {
     const promise = new Promise<THREE.Texture>((resolve, reject) => {
       textureLoader.load(
-        url,
+        entry.value,
         (texture) => {
           resolve(applyTextureOptions(texture, options));
         },
@@ -108,17 +173,20 @@ export const loadTexture = (path: string, options: TextureOptions = {}): Promise
         reject
       );
     });
-    textureCache.set(url, promise);
+    textureCache.set(entry, promise);
   }
-  return textureCache.get(url)!.then((texture) => applyTextureOptions(texture, options));
+  return textureCache.get(entry)!.then((texture) => applyTextureOptions(texture, options));
 };
 
 export const loadObj = (path: string): Promise<THREE.Group> => {
-  const url = resolveAssetUrl(path);
-  if (!objCache.has(url)) {
-    objCache.set(url, objLoader.loadAsync(url));
+  const entry = resolveAssetEntry(path);
+  if (!objCache.has(entry)) {
+    const promise = entry.kind === "raw"
+      ? Promise.resolve(objLoader.parse(entry.value))
+      : objLoader.loadAsync(entry.value);
+    objCache.set(entry, promise);
   }
-  return objCache.get(url)!;
+  return objCache.get(entry)!;
 };
 
 export const clearAssetCaches = () => {
