@@ -321,8 +321,11 @@ class MlsMpmSimulator {
       const particlePosition = this.particleBuffer.element(instanceIndex).get('position').xyz.toVar("particlePosition");
       const particleVelocity = vec3(0).toVar();
 
-      // Legacy-like initial swirl and outward movement for a more dynamic start
-      const swirl = triNoise3Dvec(particlePosition.mul(0.01), float(0.2), time.mul(0.2)).mul(0.15);
+      // Legacy-like initial swirl for motion, scaled by dt and noise to avoid drift to corners
+      const swirl = triNoise3Dvec(particlePosition.mul(0.012), float(0.12), time.mul(0.2))
+        .mul(this.uniforms.noise)
+        .mul(this.uniforms.dt)
+        .mul(0.4);
       particleVelocity.addAssign(swirl);
 
       If(this.uniforms.gravityType.equal(uint(2)), () => {
@@ -334,7 +337,7 @@ class MlsMpmSimulator {
 
       // Add legacy-like curl noise uplift instead of pure damping-only fall
       const noise = triNoise3Dvec(particlePosition.mul(0.015), float(0.11), time).sub(0.285).normalize().mul(0.28).toVar();
-      particleVelocity.subAssign(noise.mul(this.uniforms.noise).mul(this.uniforms.dt));
+      particleVelocity.subAssign(noise.mul(this.uniforms.noise).mul(this.uniforms.dt).mul(0.6));
 
       const cellIndex = ivec3(particlePosition).sub(1).toConst('cellIndex');
       const cellDiff = particlePosition.fract().sub(0.5).toConst('cellDiff');
@@ -365,14 +368,15 @@ class MlsMpmSimulator {
 
       const dist = cross(this.uniforms.mouseRayDirection, particlePosition.mul(vec3(1, 1, 0.4)).sub(this.uniforms.mouseRayOrigin)).length();
       const force = dist.mul(0.1).oneMinus().max(0.0).pow(2);
-      particleVelocity.addAssign(this.uniforms.mouseForce.mul(1).mul(force));
+      // reduce mouse force magnitude to avoid pushing particles hard toward corners
+      particleVelocity.addAssign(this.uniforms.mouseForce.mul(0.6).mul(force));
       particleVelocity.mulAssign(particleMass);
 
       this.particleBuffer.element(instanceIndex).get('C').assign(B.mul(4));
       particlePosition.addAssign(particleVelocity.mul(this.uniforms.dt));
       particlePosition.assign(clamp(particlePosition, vec3(2), this.uniforms.gridSize.sub(2)));
 
-      const wallStiffness = 0.3;
+      const wallStiffness = 0.38;
       const xN = particlePosition.add(particleVelocity.mul(this.uniforms.dt).mul(3.0)).toConst('xN');
       const wallMin = vec3(3).toConst('wallMin');
       const wallMax = vec3(this.uniforms.gridSize).sub(3).toConst('wallMax');
@@ -420,17 +424,19 @@ class MlsMpmSimulator {
     // Legacy-inspired gravity handling
     const gm = (params as any).gravityMode as PhysicsConfig["gravityMode"] | undefined;
     if (gm === "back") {
-      this.uniforms.gravity.value.set(0, 0, 0.2);
+      // pull gently toward -Z to keep fluid centered, not corner-biased
+      this.uniforms.gravity.value.set(0, 0, -0.2);
     } else if (gm === "down") {
       this.uniforms.gravity.value.set(0, -0.2, 0);
     } else if (gm === "center") {
       // handled in g2p by gravityType check
     } else if (gm === "sensor") {
-      this.uniforms.gravity.value.copy((params as any).gravitySensor?.clone?.().add?.((params as any).accelerometer) || new THREE.Vector3());
+      this.uniforms.gravity.value.copy((params as any).gravitySensor).add((params as any).accelerometer);
     } else {
       // vector
       this.uniforms.gravity.value.copy(params.gravityVector);
     }
+    this.uniforms.gravityType.value = gm === "center" ? 2 : 0;
     // Ensure numParticles uniform is always in sync
     this.uniforms.numParticles.value = this.numParticles || params.particleCount;
     this.uniforms.dynamicViscosity.value = params.viscosity;
@@ -459,8 +465,16 @@ class MlsMpmSimulator {
         .divideScalar(this.mousePosArray.length);
     }
 
-    const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
-    await this.renderer.computeAsync(kernels);
+    if (params.run) {
+      const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
+      const steps = Math.max(1, (params.iterations as number) | 0);
+      const subDt = dt / steps;
+      for (let i = 0; i < steps; i += 1) {
+        this.uniforms.dt.value = subDt;
+        await this.renderer.computeAsync(kernels);
+      }
+      this.uniforms.dt.value = dt;
+    }
   }
 
   setAudioProfile(profile) {
