@@ -2,7 +2,6 @@ export type Vector3Tuple = [number, number, number];
 
 export interface StageConfig {
   hdri: string;
-  toneMappingExposure: number;
   environmentIntensity: number;
   environmentRotation: Vector3Tuple;
   backgroundRotation: Vector3Tuple;
@@ -48,6 +47,8 @@ export interface PhysicsConfig {
   gravity: Vector3Tuple;
   gravitySensor: Vector3Tuple;
   accelerometer: Vector3Tuple;
+  // Whether to enforce container/boundary collisions in the simulator
+  boundariesEnabled?: boolean;
   gridResolution: number;
   minGridResolution: number;
   maxGridResolution: number;
@@ -63,31 +64,51 @@ export interface PhysicsConfig {
 export interface RenderConfig {
   mode: "mesh" | "points" | "hybrid";
   size: number;
-  bloomMask: number;
   lodMeshRatio: number;
   pointSizeMin: number;
   pointSizeMax: number;
 }
 
 export interface PostFxConfig {
+  enabled: boolean;
+  // Quality presets
+  qualityPreset?: "low" | "medium" | "high" | "ultra" | "custom";
+  // Bloom
   bloom: boolean;
   bloomThreshold: number;
   bloomStrength: number;
   bloomRadius: number;
+  // Exposure and tone mapping
+  exposure: number;
+  toneMapping: "none" | "reinhard" | "filmic" | "aces";
+  // Focus/DOF (depth of field blur)
   focusCenter: [number, number];
   focusInnerRadius: number;
   focusOuterRadius: number;
-  blurStrength: number;
-  blurIterations: number;
+  focusBias: number;
+  blurStrength: number; // 0-10, efficient single-pass blur
+  blurIterations: number; // Deprecated - kept for compatibility
+  // Chromatic aberration
   chromaticAberrationStrength: number;
   chromaticAberrationScale: number;
+  // Lens effects
   lensStreaks: boolean;
   lensStreakIntensity: number;
   lensStreakThreshold: number;
   lensStreakStretch: number;
+  // Temporal AA
   temporalEnabled: boolean;
   temporalFeedback: number;
   temporalBlend: number;
+  // Visual enhancements
+  vignetteStrength: number;
+  vignetteRadius: number;
+  vignetteSmoothness: number;
+  filmGrainStrength: number;
+  saturation: number;
+  contrast: number;
+  brightness: number;
+  sharpenStrength: number;
 }
 
 export interface AudioConfig {
@@ -133,7 +154,6 @@ export const APP_CONFIG_STORAGE_KEY = "aurorasv2:config";
 export const defaultConfig: AppConfig = {
   stage: {
     hdri: "autumn_field_puresky_1k.hdr",
-    toneMappingExposure: 0.66,
     environmentIntensity: 0.5,
     environmentRotation: [0, -2.15, 0],
     backgroundRotation: [0, 2.15, 0],
@@ -173,10 +193,11 @@ export const defaultConfig: AppConfig = {
     density: 1,
     restDensity: 1,
     viscosity: 0.1,
-    gravityMode: "back",
+    gravityMode: "center",
     gravity: [0, -0.8, 0],
     gravitySensor: [0, 0, 0],
     accelerometer: [0, 0, 0],
+    boundariesEnabled: false,
     gridResolution: 64,
     minGridResolution: 48,
     maxGridResolution: 96,
@@ -191,30 +212,49 @@ export const defaultConfig: AppConfig = {
   render: {
     mode: "mesh",
     size: 1,
-    bloomMask: 1,
     lodMeshRatio: 0.35,
     pointSizeMin: 0.35,
     pointSizeMax: 1.2,
   },
   postfx: {
+    enabled: true,
+    qualityPreset: "high",
+    // Bloom
     bloom: true,
     bloomThreshold: 0.82,
     bloomStrength: 0.9,
     bloomRadius: 0.6,
+    // Exposure and tone mapping
+    exposure: 1,
+    toneMapping: "filmic",
+    // Focus/DOF (efficient single-pass blur)
     focusCenter: [0.5, 0.5],
     focusInnerRadius: 0.2,
     focusOuterRadius: 0.62,
-    blurStrength: 0.045,
-    blurIterations: 36,
+    focusBias: 1,
+    blurStrength: 2.5, // 0-10 range, much more efficient!
+    blurIterations: 1, // Not used, kept for compatibility
+    // Chromatic aberration
     chromaticAberrationStrength: 0.9,
     chromaticAberrationScale: 1.1,
+    // Lens effects
     lensStreaks: true,
     lensStreakIntensity: 0.28,
     lensStreakThreshold: 0.88,
     lensStreakStretch: 2.4,
+    // Temporal AA
     temporalEnabled: true,
     temporalFeedback: 0.85,
     temporalBlend: 0.5,
+    // Visual enhancements
+    vignetteStrength: 0.3,
+    vignetteRadius: 0.75,
+    vignetteSmoothness: 0.5,
+    filmGrainStrength: 0.0,
+    saturation: 1.0,
+    contrast: 1.05,
+    brightness: 0.0,
+    sharpenStrength: 0.0,
   },
   audio: {
     enabled: false,

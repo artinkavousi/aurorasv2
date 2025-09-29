@@ -1,32 +1,54 @@
 import * as THREE from "three/webgpu";
 import { bloom } from "three/examples/jsm/tsl/display/BloomNode.js";
-import { hashBlur } from "three/examples/jsm/tsl/display/hashBlur.js";
+import { gaussianBlur } from "three/examples/jsm/tsl/display/GaussianBlurNode.js";
 import { chromaticAberration } from "three/examples/jsm/tsl/display/ChromaticAberrationNode.js";
 import { anamorphic } from "three/examples/jsm/tsl/display/AnamorphicNode.js";
 import { afterImage } from "three/examples/jsm/tsl/display/AfterImageNode.js";
-import {
-  clamp,
-  float,
-  Fn,
-  mix,
-  mrt,
-  output,
-  pass,
-  smoothstep,
-  uniform,
-  uv,
-  vec3,
-  vec4,
-} from "three/tsl";
-import type { ModuleInstance, TickInfo, AppContext, PostFxService } from "../config";
-import type { AppConfig, PostFxConfig } from "../config";
+import { clamp, Fn, mix, pass, smoothstep, uniform, uv, vec3, vec4, float } from "three/tsl";
+import type { ModuleInstance, TickInfo, AppContext, PostFxService, AppConfig, PostFxConfig } from "../app/appContext";
+
+// Small builder helpers for clarity
+const buildScenePass = (stage: { scene: THREE.Scene; camera: THREE.Camera }) => pass(stage.scene, stage.camera);
+
+// Efficient dual Kawase blur approximation using gaussian blur
+const buildEfficientBlur = (
+  input: ReturnType<ReturnType<typeof pass>["getTextureNode"]>,
+  strength: ReturnType<typeof uniform>,
+  directionX: ReturnType<typeof uniform>,
+  directionY: ReturnType<typeof uniform>
+) => {
+  // Single-pass efficient blur with directional control
+  const blurredH = gaussianBlur(input, directionX.mul(strength));
+  const blurredV = gaussianBlur(blurredH, directionY.mul(strength));
+  return blurredV;
+};
+
+const buildFocusMask = (
+  outputPass: ReturnType<ReturnType<typeof pass>["getTextureNode"]>,
+  focusCenter: ReturnType<typeof uniform>,
+  inner: ReturnType<typeof uniform>,
+  outer: ReturnType<typeof uniform>,
+  bias: ReturnType<typeof uniform>,
+  blurStrength: ReturnType<typeof uniform>,
+  blurDirectionX: ReturnType<typeof uniform>,
+  blurDirectionY: ReturnType<typeof uniform>
+) => {
+  // Use efficient gaussian blur instead of expensive hash blur
+  const blurred = buildEfficientBlur(outputPass, blurStrength, blurDirectionX, blurDirectionY);
+  const uvNode = outputPass.uvNode || uv();
+  const mask = smoothstep(inner, outer, uvNode.sub(focusCenter).length().pow(bias));
+  const composite = mix(outputPass, blurred, mask);
+  return { composite, mask } as const;
+};
 
 interface PipelineNodes {
-  blurAmount: ReturnType<typeof uniform>;
-  blurIterations: ReturnType<typeof uniform>;
+  blurStrength: ReturnType<typeof uniform>;
+  blurDirectionX: ReturnType<typeof uniform>;
+  blurDirectionY: ReturnType<typeof uniform>;
   focusCenter: ReturnType<typeof uniform>;
   focusInnerRadius: ReturnType<typeof uniform>;
   focusOuterRadius: ReturnType<typeof uniform>;
+  focusBias: ReturnType<typeof uniform>;
   chromaStrength: ReturnType<typeof uniform>;
   chromaScale: ReturnType<typeof uniform>;
   bloomEnabled: ReturnType<typeof uniform>;
@@ -35,6 +57,17 @@ interface PipelineNodes {
   lensIntensity: ReturnType<typeof uniform>;
   lensEnabled: ReturnType<typeof uniform>;
   temporalBlend: ReturnType<typeof uniform>;
+  exposure: ReturnType<typeof uniform>;
+  toneMapMode: ReturnType<typeof uniform>;
+  // New visual enhancements
+  vignetteStrength: ReturnType<typeof uniform>;
+  vignetteRadius: ReturnType<typeof uniform>;
+  vignetteSmoothness: ReturnType<typeof uniform>;
+  filmGrainStrength: ReturnType<typeof uniform>;
+  saturation: ReturnType<typeof uniform>;
+  contrast: ReturnType<typeof uniform>;
+  brightness: ReturnType<typeof uniform>;
+  sharpenStrength: ReturnType<typeof uniform>;
 }
 
 interface PostfxState {
@@ -53,21 +86,19 @@ const createPipeline = (
   renderer: THREE.WebGPURenderer,
   stage: { scene: THREE.Scene; camera: THREE.Camera }
 ) => {
-  const scenePass = pass(stage.scene, stage.camera);
-  scenePass.setMRT(
-    mrt({
-      output,
-      bloomIntensity: float(0),
-    })
-  );
+  const scenePass = buildScenePass(stage);
 
   const outputPass = scenePass.getTextureNode();
-  const bloomIntensityPass = scenePass.getTextureNode("bloomIntensity");
-  const blurAmount = uniform(0.04);
-  const blurIterations = uniform(32);
+  
+  // Efficient blur controls (no iterations needed!)
+  const blurStrength = uniform(2.0);  // Single strength value
+  const blurDirectionX = uniform(1.0); // Horizontal direction
+  const blurDirectionY = uniform(1.0); // Vertical direction
+  
   const focusCenter = uniform(new THREE.Vector2(0.5, 0.5));
   const focusInnerRadius = uniform(0.2);
   const focusOuterRadius = uniform(0.62);
+  const focusBias = uniform(1.0);
   const chromaStrength = uniform(0.8);
   const chromaScale = uniform(1.1);
   const bloomEnabled = uniform(1);
@@ -76,15 +107,30 @@ const createPipeline = (
   const lensIntensity = uniform(0.25);
   const lensEnabled = uniform(1);
   const temporalBlend = uniform(0.5);
+  const exposure = uniform(1.0);
+  // 0 = none, 1 = reinhard, 2 = filmic, 3 = aces
+  const toneMapMode = uniform(1);
+  
+  // Visual enhancements
+  const vignetteStrength = uniform(0.3);
+  const vignetteRadius = uniform(0.75);
+  const vignetteSmoothness = uniform(0.5);
+  const filmGrainStrength = uniform(0.0);
+  const saturation = uniform(1.0);
+  const contrast = uniform(1.0);
+  const brightness = uniform(0.0);
+  const sharpenStrength = uniform(0.0);
 
-  const blurredScene = hashBlur(outputPass, blurAmount, { repeats: blurIterations });
-  const uvNode = outputPass.uvNode || uv();
-  const radialMask = smoothstep(
+  const { composite: focusComposite, mask: radialMask } = buildFocusMask(
+    outputPass,
+    focusCenter,
     focusInnerRadius,
     focusOuterRadius,
-    uvNode.sub(focusCenter).length()
+    focusBias,
+    blurStrength,
+    blurDirectionX,
+    blurDirectionY
   );
-  const focusComposite = mix(outputPass, blurredScene, radialMask);
 
   const chroma = chromaticAberration(
     focusComposite,
@@ -92,10 +138,68 @@ const createPipeline = (
     focusCenter,
     chromaScale
   );
-  const bloomSource = focusComposite.mul(bloomIntensityPass);
-  const bloomPass = bloom(bloomSource);
+  const bloomPass = bloom(focusComposite);
   const lensPass = anamorphic(focusComposite, lensThreshold, lensStretch, 48);
   lensPass.colorNode = vec3(0.85, 0.9, 1.0);
+
+  // Enhanced tonemapping functions
+  const applyTonemapping = Fn(([color, mode]) => {
+    const c = color.toVar();
+    // 0 = none
+    const none = c;
+    // 1 = reinhard
+    const reinhard = c.div(c.add(vec3(1)));
+    // 2 = filmic (John Hable's Uncharted 2 - simplified)
+    const filmicHelper = Fn(([x]) => {
+      const A = float(0.15);
+      const B = float(0.50);
+      const C = float(0.10);
+      const D = float(0.20);
+      const E = float(0.02);
+      const F = float(0.30);
+      return x.mul(x.mul(A).add(C.mul(B))).add(D.mul(E)).div(x.mul(x.mul(A).add(B)).add(D.mul(F))).sub(E.div(F));
+    });
+    const filmic = filmicHelper(c.mul(2.0)).div(filmicHelper(vec3(11.2)));
+    // 3 = ACES approximation
+    const aces = c.mul(c.mul(2.51).add(0.03)).div(c.mul(c.mul(2.43).add(0.59)).add(0.14)).clamp(0, 1);
+    
+    // Blend between modes
+    const modeVal = mode.toVar();
+    const step1 = mix(none, reinhard, clamp(modeVal, 0, 1));
+    const step2 = mix(step1, filmic, clamp(modeVal.sub(1), 0, 1));
+    const final = mix(step2, aces, clamp(modeVal.sub(2), 0, 1));
+    return final;
+  });
+
+  // Film grain noise generator
+  const filmGrain = Fn(([uvCoord, strength, time]) => {
+    const x = uvCoord.x.mul(uvCoord.y).mul(time.mul(1000.0));
+    const noise = x.sin().mul(43758.5453).fract();
+    return noise.sub(0.5).mul(strength);
+  });
+
+  // Vignette effect
+  const vignette = Fn(([uvCoord, strength, radius, smoothness]) => {
+    const center = uvCoord.sub(vec3(0.5, 0.5, 0.0));
+    const dist = center.length();
+    const vig = smoothstep(radius, radius.sub(smoothness), dist);
+    return mix(1.0, vig, strength);
+  });
+
+  // Color adjustments
+  const adjustColor = Fn(([color, sat, cont, bright]) => {
+    // Brightness
+    const brightened = color.add(bright).toVar();
+    // Contrast
+    const contrasted = brightened.sub(0.5).mul(cont).add(0.5).toVar();
+    // Saturation
+    const gray = contrasted.dot(vec3(0.299, 0.587, 0.114));
+    const saturated = mix(vec3(gray), contrasted, sat);
+    return saturated;
+  });
+
+  // Note: Sharpen disabled for now due to complexity with TSL texture sampling
+  // Can be re-enabled with proper texture node access patterns
 
   const composite = Fn(() => {
     const focused = chroma.toVar();
@@ -105,8 +209,30 @@ const createPipeline = (
       .rgb.mul(lensIntensity)
       .mul(lensEnabled)
       .toVar();
-    const combined = focused.rgb.add(bloomColor).add(lensColor).clamp(0, 1);
-    return vec4(combined, focused.a);
+    
+    // Combine effects with exposure
+    const combined = focused.rgb.add(bloomColor).add(lensColor).toVar();
+    
+    // Exposure (sharpen effect disabled for now)
+    const exposed = combined.mul(exposure).toVar();
+    
+    // Tonemapping
+    const mapped = applyTonemapping(exposed, toneMapMode).toVar();
+    
+    // Color adjustments
+    const adjusted = adjustColor(mapped, saturation, contrast, brightness).toVar();
+    
+    // Film grain
+    const uvNode = outputPass.uvNode || uv();
+    const grain = filmGrain(uvNode, filmGrainStrength, float(0.0)).toVar();
+    const grained = adjusted.add(grain).toVar();
+    
+    // Vignette
+    const vigMask = vignette(uvNode, vignetteStrength, vignetteRadius, vignetteSmoothness).toVar();
+    const vignetted = grained.mul(vigMask).toVar();
+    
+    const final = vignetted.clamp(0, 1);
+    return vec4(final, focused.a);
   });
 
   const compositeNode = composite();
@@ -125,11 +251,13 @@ const createPipeline = (
   pipeline.outputNode = outputNode;
 
   const nodes: PipelineNodes = {
-    blurAmount,
-    blurIterations,
+    blurStrength,
+    blurDirectionX,
+    blurDirectionY,
     focusCenter,
     focusInnerRadius,
     focusOuterRadius,
+    focusBias,
     chromaStrength,
     chromaScale,
     bloomEnabled,
@@ -138,6 +266,16 @@ const createPipeline = (
     lensIntensity,
     lensEnabled,
     temporalBlend,
+    exposure,
+    toneMapMode,
+    vignetteStrength,
+    vignetteRadius,
+    vignetteSmoothness,
+    filmGrainStrength,
+    saturation,
+    contrast,
+    brightness,
+    sharpenStrength,
   };
 
   return {
@@ -151,50 +289,136 @@ const createPipeline = (
 };
 
 const disposePipeline = (state: PostfxState) => {
-  state.pipeline?.dispose();
+  try {
+    state.pipeline?.dispose();
+  } catch (error) {
+    console.warn("[PostFX] Error disposing pipeline:", error);
+  }
   state.pipeline = null;
   state.scenePass = null;
-  state.bloomPass?.dispose?.();
+  
+  try {
+    state.bloomPass?.dispose?.();
+  } catch (error) {
+    console.warn("[PostFX] Error disposing bloom:", error);
+  }
   state.bloomPass = null;
-  state.lensPass?.dispose?.();
+  
+  try {
+    state.lensPass?.dispose?.();
+  } catch (error) {
+    console.warn("[PostFX] Error disposing lens:", error);
+  }
   state.lensPass = null;
-  state.temporalNode?.dispose?.();
+  
+  try {
+    state.temporalNode?.dispose?.();
+  } catch (error) {
+    console.warn("[PostFX] Error disposing temporal:", error);
+  }
   state.temporalNode = null;
+  
   state.stageHandle = null;
   state.nodes = null;
 };
 
+// Validate and clamp config values
+const validateConfig = (config: PostFxConfig) => {
+  const extended = config as PostFxConfig & Record<string, unknown>;
+  return {
+    ...config,
+    blurStrength: Math.max(0, Math.min(10, config.blurStrength)),
+    blurIterations: 1, // Not used anymore, always 1 pass
+    focusCenter: [
+      Math.max(0, Math.min(1, config.focusCenter[0])),
+      Math.max(0, Math.min(1, config.focusCenter[1])),
+    ] as [number, number],
+    focusInnerRadius: Math.max(0, Math.min(1, config.focusInnerRadius)),
+    focusOuterRadius: Math.max(0, Math.min(2, config.focusOuterRadius)),
+    focusBias: Math.max(0.25, Math.min(4, config.focusBias ?? 1)),
+    chromaticAberrationStrength: Math.max(0, Math.min(3, config.chromaticAberrationStrength)),
+    chromaticAberrationScale: Math.max(0.5, Math.min(3, config.chromaticAberrationScale)),
+    bloomThreshold: Math.max(0, Math.min(2, config.bloomThreshold)),
+    bloomStrength: Math.max(0, Math.min(5, config.bloomStrength)),
+    bloomRadius: Math.max(0, Math.min(2, config.bloomRadius)),
+    lensStreakThreshold: Math.max(0, Math.min(1, config.lensStreakThreshold)),
+    lensStreakStretch: Math.max(0.5, Math.min(10, config.lensStreakStretch)),
+    lensStreakIntensity: Math.max(0, Math.min(3, config.lensStreakIntensity)),
+    temporalBlend: Math.max(0, Math.min(1, config.temporalBlend)),
+    temporalFeedback: Math.max(0, Math.min(0.98, config.temporalFeedback)),
+    exposure: Math.max(0, Math.min(5, config.exposure ?? 1)),
+    // Extended visual parameters
+    vignetteStrength: Math.max(0, Math.min(1, extended.vignetteStrength as number ?? 0.3)),
+    vignetteRadius: Math.max(0, Math.min(2, extended.vignetteRadius as number ?? 0.75)),
+    vignetteSmoothness: Math.max(0, Math.min(1, extended.vignetteSmoothness as number ?? 0.5)),
+    filmGrainStrength: Math.max(0, Math.min(1, extended.filmGrainStrength as number ?? 0)),
+    saturation: Math.max(0, Math.min(2, extended.saturation as number ?? 1)),
+    contrast: Math.max(0, Math.min(3, extended.contrast as number ?? 1)),
+    brightness: Math.max(-0.5, Math.min(0.5, extended.brightness as number ?? 0)),
+    sharpenStrength: Math.max(0, Math.min(1, extended.sharpenStrength as number ?? 0)),
+  };
+};
+
 const applyConfig = (state: PostfxState, config: PostFxConfig) => {
+  const validated = validateConfig(config);
   state.currentConfig = config;
   const nodes = state.nodes;
   if (!nodes || !state.bloomPass || !state.lensPass || !state.temporalNode) {
     return;
   }
 
-  nodes.blurAmount.value = Math.max(0, config.blurStrength);
-  nodes.blurIterations.value = Math.max(1, config.blurIterations);
-  const centerX = Math.min(Math.max(config.focusCenter[0], 0), 1);
-  const centerY = Math.min(Math.max(config.focusCenter[1], 0), 1);
-  nodes.focusCenter.value.set(centerX, centerY);
-  const innerRadius = Math.max(0, Math.min(config.focusInnerRadius, config.focusOuterRadius - 0.001));
-  const outerRadius = Math.max(innerRadius + 0.001, config.focusOuterRadius);
-  nodes.focusInnerRadius.value = innerRadius;
-  nodes.focusOuterRadius.value = outerRadius;
-  nodes.chromaStrength.value = Math.max(0, config.chromaticAberrationStrength);
-  nodes.chromaScale.value = Math.max(0.5, config.chromaticAberrationScale);
-  nodes.bloomEnabled.value = config.bloom ? 1 : 0;
-  nodes.lensThreshold.value = config.lensStreakThreshold;
-  nodes.lensStretch.value = config.lensStreakStretch;
-  nodes.lensIntensity.value = Math.max(0, config.lensStreakIntensity);
-  nodes.lensEnabled.value = config.lensStreaks ? 1 : 0;
-  nodes.temporalBlend.value = config.temporalEnabled ? Math.min(Math.max(config.temporalBlend, 0), 1) : 0;
+  try {
+    // New efficient blur - single strength parameter
+    nodes.blurStrength.value = validated.blurStrength;
+    nodes.blurDirectionX.value = 1.0;
+    nodes.blurDirectionY.value = 1.0;
+    nodes.focusCenter.value.set(validated.focusCenter[0], validated.focusCenter[1]);
+    
+    const innerRadius = Math.min(validated.focusInnerRadius, validated.focusOuterRadius - 0.001);
+    const outerRadius = Math.max(innerRadius + 0.001, validated.focusOuterRadius);
+    nodes.focusInnerRadius.value = innerRadius;
+    nodes.focusOuterRadius.value = outerRadius;
+    
+    nodes.chromaStrength.value = validated.chromaticAberrationStrength;
+    nodes.chromaScale.value = validated.chromaticAberrationScale;
+    nodes.focusBias.value = validated.focusBias;
+    nodes.bloomEnabled.value = validated.bloom ? 1 : 0;
+    nodes.lensThreshold.value = validated.lensStreakThreshold;
+    nodes.lensStretch.value = validated.lensStreakStretch;
+    nodes.lensIntensity.value = validated.lensStreakIntensity;
+    nodes.lensEnabled.value = validated.lensStreaks ? 1 : 0;
+    nodes.temporalBlend.value = validated.temporalEnabled ? validated.temporalBlend : 0;
+    nodes.exposure.value = validated.exposure;
+    
+    // Map tone mapping mode
+    const toneMode: string = validated.toneMapping;
+    const toneMapValue = 
+      toneMode === "reinhard" ? 1 :
+      toneMode === "filmic" ? 2 :
+      toneMode === "aces" ? 3 : 0;
+    nodes.toneMapMode.value = toneMapValue;
+    
+    // New visual parameters
+    const extended = validated as PostFxConfig & Record<string, unknown>;
+    nodes.vignetteStrength.value = extended.vignetteStrength as number ?? 0.3;
+    nodes.vignetteRadius.value = extended.vignetteRadius as number ?? 0.75;
+    nodes.vignetteSmoothness.value = extended.vignetteSmoothness as number ?? 0.5;
+    nodes.filmGrainStrength.value = extended.filmGrainStrength as number ?? 0;
+    nodes.saturation.value = extended.saturation as number ?? 1;
+    nodes.contrast.value = extended.contrast as number ?? 1;
+    nodes.brightness.value = extended.brightness as number ?? 0;
+    nodes.sharpenStrength.value = extended.sharpenStrength as number ?? 0;
 
-  state.bloomPass.threshold.value = config.bloomThreshold;
-  state.bloomPass.strength.value = config.bloomStrength;
-  state.bloomPass.radius.value = config.bloomRadius;
+    state.bloomPass.threshold.value = validated.bloomThreshold;
+    state.bloomPass.strength.value = validated.bloomStrength;
+    state.bloomPass.radius.value = validated.bloomRadius;
 
-  state.lensPass.resolutionScale = 0.5;
-  state.temporalNode.damp.value = Math.min(Math.max(config.temporalFeedback, 0), 0.98);
+    // Adaptive resolution scaling for lens effect (more aggressive for performance)
+    state.lensPass.resolutionScale = 0.4;
+    state.temporalNode.damp.value = validated.temporalFeedback;
+  } catch (error) {
+    console.warn("[PostFX] Error applying config:", error);
+  }
 };
 
 const ensurePipeline = (state: PostfxState, context: AppContext) => {
@@ -207,24 +431,32 @@ const ensurePipeline = (state: PostfxState, context: AppContext) => {
   if (state.stageHandle === stage && state.pipeline) {
     return true;
   }
-  disposePipeline(state);
-  const resources = createPipeline(context.renderer, stage);
-  state.scenePass = resources.scenePass;
-  state.bloomPass = resources.bloomPass;
-  state.lensPass = resources.lensPass;
-  state.temporalNode = resources.temporalNode;
-  state.pipeline = resources.pipeline;
-  state.stageHandle = stage;
-  state.nodes = resources.nodes;
-  applyConfig(state, state.currentConfig ?? context.config.value.postfx);
-  context.services.postfx = {
-    pipeline: state.pipeline,
-    bloomPass: state.bloomPass,
-    scenePass: state.scenePass,
-    lensPass: state.lensPass,
-    temporalNode: state.temporalNode,
-  } as PostFxService;
-  return true;
+  
+  try {
+    disposePipeline(state);
+    const resources = createPipeline(context.renderer, stage);
+    state.scenePass = resources.scenePass;
+    state.bloomPass = resources.bloomPass;
+    state.lensPass = resources.lensPass;
+    state.temporalNode = resources.temporalNode;
+    state.pipeline = resources.pipeline;
+    state.stageHandle = stage;
+    state.nodes = resources.nodes;
+    applyConfig(state, state.currentConfig ?? context.config.value.postfx);
+    context.services.postfx = {
+      pipeline: state.pipeline,
+      bloomPass: state.bloomPass,
+      scenePass: state.scenePass,
+      lensPass: state.lensPass,
+      temporalNode: state.temporalNode,
+    } as PostFxService;
+    return true;
+  } catch (error) {
+    console.error("[PostFX] Failed to create pipeline:", error);
+    disposePipeline(state);
+    delete context.services.postfx;
+    return false;
+  }
 };
 
 export const createPostfxModule = (): ModuleInstance => {
@@ -264,7 +496,8 @@ export const createPostfxModule = (): ModuleInstance => {
         return;
       }
       tick.setRenderOverride(async () => {
-        if (state.pipeline) {
+        const enabled = (tick.config.postfx as PostFxConfig).enabled !== false;
+        if (state.pipeline && enabled) {
           await state.pipeline.renderAsync();
         } else {
           await tick.context.renderer.renderAsync(stage.scene, stage.camera);
