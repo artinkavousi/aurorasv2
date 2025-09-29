@@ -8,6 +8,11 @@ import * as EssentialsPlugin from "@tweakpane/plugin-essentials";
 import * as InfoDumpPlugin from "tweakpane-plugin-infodump";
 import { createPanel } from "./ui/panels";
 
+interface SliderControl {
+  input: HTMLInputElement;
+  setValue: (value: number) => void;
+}
+
 interface DashboardState {
   container: HTMLDivElement | null;
   // Tweakpane panes and wrappers
@@ -33,6 +38,16 @@ interface DashboardState {
   beatLabel: HTMLSpanElement | null;
   unsubscribeConfig: (() => void) | null;
   fpsAvg: number;
+  focusX: SliderControl | null;
+  focusY: SliderControl | null;
+  focusRadius: SliderControl | null;
+  focusFeather: SliderControl | null;
+  blurStrength: SliderControl | null;
+  chromaStrength: SliderControl | null;
+  bloomStrength: SliderControl | null;
+  lensIntensity: SliderControl | null;
+  temporalBlend: SliderControl | null;
+  temporalFeedback: SliderControl | null;
 }
 
 const createContainer = () => {
@@ -92,48 +107,7 @@ const createToggle = (label: string) => {
   return { wrapper, input };
 };
 
-const createSlider = (
-  label: string,
-  options: { min: number; max: number; step?: number; initial?: number; format?: (v: number) => string }
-) => {
-  const wrapper = document.createElement("div");
-  wrapper.style.display = "grid";
-  wrapper.style.gridTemplateColumns = "1fr auto";
-  wrapper.style.alignItems = "center";
-  wrapper.style.gap = "8px";
-
-  const labelEl = document.createElement("label");
-  labelEl.style.display = "grid";
-  labelEl.style.rowGap = "6px";
-
-  const text = document.createElement("span");
-  text.textContent = label;
-  text.style.fontWeight = "500";
-
-  const input = document.createElement("input");
-  input.type = "range";
-  input.min = String(options.min);
-  input.max = String(options.max);
-  if (options.step !== undefined) input.step = String(options.step);
-  if (options.initial !== undefined) input.value = String(options.initial);
-  input.style.width = "100%";
-
-  const value = document.createElement("span");
-  value.style.fontVariantNumeric = "tabular-nums";
-  value.style.opacity = "0.8";
-  const fmt = options.format ?? ((v: number) => (input.step && Number(input.step) >= 1 ? Math.round(v).toString() : v.toFixed(2)));
-  const setValueText = () => {
-    value.textContent = fmt(Number(input.value));
-  };
-  setValueText();
-  input.addEventListener("input", setValueText);
-
-  labelEl.appendChild(text);
-  labelEl.appendChild(input);
-  wrapper.appendChild(labelEl);
-  wrapper.appendChild(value);
-  return { wrapper, input, value };
-};
+// Note: Legacy DOM slider helpers from a prior UI variant were removed in favor of Tweakpane bindings.
 
 const createSelect = (label: string, options: Array<{ value: string; text: string }>) => {
   const wrapper = document.createElement("label");
@@ -187,7 +161,7 @@ const createMetricsRow = (label: string) => {
 // using shared panel utility now
 
 const applyConfigToControls = (state: DashboardState, config: AppConfig) => {
-  // No-op: Tweakpane bindings reflect model values; we keep subscription for future sync if needed
+  // Tweakpane bindings reflect model values; keep subscription for future sync if needed
 };
 
 export const createDashboardModule = (): ModuleInstance => {
@@ -215,6 +189,16 @@ export const createDashboardModule = (): ModuleInstance => {
     beatLabel: null,
     unsubscribeConfig: null,
     fpsAvg: 0,
+    focusX: null,
+    focusY: null,
+    focusRadius: null,
+    focusFeather: null,
+    blurStrength: null,
+    chromaStrength: null,
+    bloomStrength: null,
+    lensIntensity: null,
+    temporalBlend: null,
+    temporalFeedback: null,
   };
 
   const updateMetrics = (tick: TickInfo) => {

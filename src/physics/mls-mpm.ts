@@ -17,17 +17,25 @@ import {
   uint,
   max,
   pow,
-    mat3,
+  mat3,
   clamp,
   time,
   cross,
   mix,
-      ivec3,
+  ivec3,
 } from "three/tsl";
 import { triNoise3Dvec } from "../commons/tsl/noise";
 import { hsvtorgb } from "../commons/tsl/hsv";
 import { StructuredArray } from "./structuredArray";
-import type { ModuleInstance, TickInfo, AppContext, AudioProfile, PointerRay, PhysicsService } from "../config";
+import type {
+  ModuleInstance,
+  TickInfo,
+  AppContext,
+  AudioProfile,
+  PointerRay,
+  PhysicsService,
+  PhysicsMetrics,
+} from "../config";
 import type { PhysicsConfig } from "../config";
 
 interface PhysicsState extends PhysicsConfig {
@@ -41,15 +49,26 @@ class MlsMpmSimulator {
   numParticles = 0;
   gridSize = new THREE.Vector3(0, 0, 0);
   gridCellSize = new THREE.Vector3(0, 0, 0);
+  gridResolution = 64;
   uniforms = {};
   kernels = {};
   fixedPointMultiplier = 1e7;
   mousePos = new THREE.Vector3();
   mousePosArray = [];
+  cameraPosition = new THREE.Vector3();
   particleBuffer;
   cellBuffer;
   cellBufferF;
   params;
+  metrics: PhysicsMetrics = {
+    frameTimeMs: 0,
+    computeTimeMs: 0,
+    particleCount: 0,
+    substeps: 0,
+    gridResolution: 0,
+  };
+  stageScale = 64;
+  stageOffset = new THREE.Vector3(32, 0, 0);
 
   constructor(renderer, params) {
     this.renderer = renderer;
@@ -61,8 +80,12 @@ class MlsMpmSimulator {
   }
 
   async init() {
-    const { maxParticles } = this.params;
-    this.gridSize.set(64, 64, 64);
+    const { maxParticles, gridResolution } = this.params;
+    const resolution = Math.max(8, Math.floor(gridResolution ?? 64));
+    this.gridResolution = resolution;
+    this.gridSize.set(resolution, resolution, resolution);
+    this.gridCellSize.setScalar(1 / resolution);
+    this.metrics.gridResolution = resolution;
 
     const particleStruct = {
       position: { type: "vec3" },
@@ -72,6 +95,7 @@ class MlsMpmSimulator {
       C: { type: "mat3" },
       direction: { type: "vec3" },
       color: { type: "vec3" },
+      lodLevel: { type: "float" },
     };
     this.particleBuffer = new StructuredArray(particleStruct, maxParticles, "particleData");
 
@@ -130,12 +154,19 @@ class MlsMpmSimulator {
     this.uniforms.gridCellSize = uniform(this.gridCellSize);
     this.uniforms.dt = uniform(0.1);
     this.uniforms.numParticles = uniform(0, "uint");
+    this.uniforms.cellCount = uniform(cellCount, "uint");
+    this.uniforms.cellCount.value = cellCount;
 
     this.uniforms.mouseRayDirection = uniform(new THREE.Vector3());
     this.uniforms.mouseRayOrigin = uniform(new THREE.Vector3());
     this.uniforms.mouseForce = uniform(new THREE.Vector3());
-
-    const cellCountUint = uint(cellCount);
+    this.uniforms.mouseActive = uniform(0, "uint");
+    this.uniforms.pointerStrength = uniform(0);
+    this.uniforms.pointerFalloff = uniform(0.1);
+    this.uniforms.turbulenceStrength = uniform(0);
+    this.uniforms.cameraPosition = uniform(new THREE.Vector3());
+    this.uniforms.lodNearDistance = uniform(this.params.lodNear ?? 18);
+    this.uniforms.lodFarDistance = uniform(this.params.lodFar ?? 36);
 
     this.kernels.clearGrid = Fn(() => {
       this.cellBuffer.setAtomic("x", false);
@@ -143,7 +174,7 @@ class MlsMpmSimulator {
       this.cellBuffer.setAtomic("z", false);
       this.cellBuffer.setAtomic("mass", false);
 
-      If(instanceIndex.greaterThanEqual(cellCountUint), () => {
+      If(instanceIndex.greaterThanEqual(this.uniforms.cellCount), () => {
         Return();
       });
 
@@ -277,12 +308,7 @@ class MlsMpmSimulator {
     })().compute(maxParticles);
 
     this.kernels.updateGrid = Fn(() => {
-      // Switch atomics off for readback (WGSL can't cast atomic<i32> directly)
-      this.cellBuffer.setAtomic("x", false);
-      this.cellBuffer.setAtomic("y", false);
-      this.cellBuffer.setAtomic("z", false);
-      this.cellBuffer.setAtomic("mass", false);
-      If(instanceIndex.greaterThanEqual(cellCountUint), () => {
+      If(instanceIndex.greaterThanEqual(this.uniforms.cellCount), () => {
         Return();
       });
 
@@ -301,14 +327,14 @@ class MlsMpmSimulator {
 
       const dt = this.uniforms.dt;
       const damping = float(1).sub(this.uniforms.dynamicViscosity.mul(dt).mul(40));
-      const noise = this.uniforms.noise;
-
       const noiseVel = triNoise3Dvec(cellVel.mul(0.05), float(1), time.mul(0.1));
       const audioBands = this.uniforms.audioBands.toConst("audioBands");
-      // Base noise from slider (independent of audio), plus optional audio-driven boost
-      const baseNoiseMag = this.uniforms.noise.mul(0.2);
-      const audioNoiseMag = audioBands.y.mul(0.25).mul(this.uniforms.audioLevel);
-      const noiseMagnitude = baseNoiseMag.add(audioNoiseMag).toConst();
+      // Base noise from slider plus optional audio/turbulence boost
+      const noiseMagnitude = this.uniforms.noise
+        .mul(0.2)
+        .add(audioBands.y.mul(0.25).mul(this.uniforms.audioLevel))
+        .add(this.uniforms.turbulenceStrength.mul(0.35))
+        .toConst();
       const noiseVec = noiseVel.mul(noiseMagnitude);
 
       const newVel = cellVel.mul(damping).add(gravityForce.mul(dt)).add(noiseVec.mul(dt));
@@ -317,14 +343,16 @@ class MlsMpmSimulator {
     })().compute(cellCount);
 
     this.kernels.g2p = Fn(() => {
-      If(instanceIndex.greaterThanEqual(uint(this.uniforms.numParticles)), () => { Return(); });
+      If(instanceIndex.greaterThanEqual(uint(this.uniforms.numParticles)), () => {
+        Return();
+      });
 
       const particleMass = float(1);
-      const particleDensity = this.particleBuffer.element(instanceIndex).get('density').toConst("particleDensity");
-      const particlePosition = this.particleBuffer.element(instanceIndex).get('position').xyz.toVar("particlePosition");
+      const particleDensityVal = this.particleBuffer.element(instanceIndex).get("density").toConst("particleDensity");
+      const particlePosition = this.particleBuffer.element(instanceIndex).get("position").xyz.toVar("particlePosition");
       const particleVelocity = vec3(0).toVar();
 
-      // Legacy-like initial swirl for motion, scaled by dt and noise to avoid drift to corners
+      // Swirl for motion, scaled by dt and noise to avoid drift
       const swirl = triNoise3Dvec(particlePosition.mul(0.012), float(0.12), time.mul(0.2))
         .mul(this.uniforms.noise)
         .mul(this.uniforms.dt)
@@ -338,26 +366,42 @@ class MlsMpmSimulator {
         particleVelocity.addAssign(this.uniforms.gravity.mul(this.uniforms.dt));
       });
 
-      // Add legacy-like curl noise uplift instead of pure damping-only fall
-      const noise = triNoise3Dvec(particlePosition.mul(0.015), float(0.11), time).sub(0.285).normalize().mul(0.28).toVar();
-      particleVelocity.subAssign(noise.mul(this.uniforms.noise).mul(this.uniforms.dt).mul(0.6));
+      const noiseVec = triNoise3Dvec(particlePosition.mul(0.015), float(0.11), time)
+        .sub(0.285)
+        .normalize()
+        .mul(0.28)
+        .toVar();
+      particleVelocity.subAssign(noiseVec.mul(this.uniforms.noise).mul(this.uniforms.dt).mul(0.6));
 
-      const cellIndex = ivec3(particlePosition).sub(1).toConst('cellIndex');
-      const cellDiff = particlePosition.fract().sub(0.5).toConst('cellDiff');
+      const cellIndex = ivec3(particlePosition).sub(1).toConst("cellIndex");
+      const cellDiff = particlePosition.fract().sub(0.5).toConst("cellDiff");
       const w0 = float(0.5).mul(float(0.5).sub(cellDiff)).mul(float(0.5).sub(cellDiff));
       const w1 = float(0.75).sub(cellDiff.mul(cellDiff));
       const w2 = float(0.5).mul(float(0.5).add(cellDiff)).mul(float(0.5).add(cellDiff));
-      const weights = array([w0, w1, w2]).toConst('weights');
+      const weights = array([w0, w1, w2]).toConst("weights");
 
-      const B = mat3(0).toVar('B');
-      Loop({ start: 0, end: 3, type: 'int', name: 'gx', condition: '<' }, ({ gx }) => {
-        Loop({ start: 0, end: 3, type: 'int', name: 'gy', condition: '<' }, ({ gy }) => {
-          Loop({ start: 0, end: 3, type: 'int', name: 'gz', condition: '<' }, ({ gz }) => {
+      const audioBeat = this.uniforms.audioBeat.toConst("audioBeat");
+      const audioBands = this.uniforms.audioBands.toConst("audioBands");
+      const audioLevel = this.uniforms.audioLevel.toConst("audioLevel");
+      const pointerOrigin = this.uniforms.mouseRayOrigin.toConst("pointerOrigin");
+      const pointerDirection = this.uniforms.mouseRayDirection.toConst("pointerDirection");
+      const pointerStrength = this.uniforms.pointerStrength.toConst("pointerStrength");
+      const pointerFalloff = this.uniforms.pointerFalloff.toConst("pointerFalloff");
+      const pointerEnabled = float(this.uniforms.mouseActive).toConst("pointerEnabled");
+      const historicalPointerForce = this.uniforms.mouseForce.toConst("mouseForce");
+      const cameraPosition = this.uniforms.cameraPosition.toConst("cameraPosition");
+      const lodNear = this.uniforms.lodNearDistance.toConst("lodNear");
+      const lodFar = this.uniforms.lodFarDistance.toConst("lodFar");
+
+      const B = mat3().toVar();
+      Loop({ start: 0, end: 3, type: "int", name: "gx", condition: "<" }, ({ gx }) => {
+        Loop({ start: 0, end: 3, type: "int", name: "gy", condition: "<" }, ({ gy }) => {
+          Loop({ start: 0, end: 3, type: "int", name: "gz", condition: "<" }, ({ gz }) => {
             const weight = weights.element(gx).x.mul(weights.element(gy).y).mul(weights.element(gz).z);
             const cellX = cellIndex.add(ivec3(gx, gy, gz)).toConst();
-            const cellDist = vec3(cellX).add(0.5).sub(particlePosition).toConst('cellDist');
+            const cellDist = vec3(cellX).add(0.5).sub(particlePosition).toConst("cellDist");
             const cellPtr = getCellPtr(cellX);
-            const weightedVelocity = this.cellBufferF.element(cellPtr).xyz.mul(weight).toConst('weightedVelocity');
+            const weightedVelocity = this.cellBufferF.element(cellPtr).xyz.mul(weight).toConst("weightedVelocity");
             const term = mat3(
               weightedVelocity.mul(cellDist.x),
               weightedVelocity.mul(cellDist.y),
@@ -369,35 +413,82 @@ class MlsMpmSimulator {
         });
       });
 
-      const dist = cross(this.uniforms.mouseRayDirection, particlePosition.mul(vec3(1, 1, 0.4)).sub(this.uniforms.mouseRayOrigin)).length();
-      // Wider influence and stronger push
-      const force = dist.mul(0.05).oneMinus().max(0.0).pow(2);
-      particleVelocity.addAssign(this.uniforms.mouseForce.mul(2.2).mul(force));
+      const force = particleVelocity.length();
+      const pointerToParticle = particlePosition.sub(pointerOrigin).toConst("pointerToParticle");
+      const pointerAxis = pointerDirection.mul(pointerToParticle.dot(pointerDirection));
+      const pointerRadial = pointerToParticle.sub(pointerAxis).toConst("pointerRadial");
+      const radialLength = pointerRadial.length().add(0.0001).toConst("radialLength");
+      const pointerAttenuation = clamp(float(1).sub(radialLength.mul(pointerFalloff)), float(0), float(1));
+      const pointerImpulse = pointerRadial
+        .div(radialLength)
+        .mul(pointerStrength.mul(pointerAttenuation).mul(pointerEnabled));
+      particleVelocity.addAssign(pointerImpulse);
+      particleVelocity.addAssign(historicalPointerForce.mul(pointerStrength).mul(pointerEnabled).mul(force.mul(0.2)));
       particleVelocity.mulAssign(particleMass);
 
-      this.particleBuffer.element(instanceIndex).get('C').assign(B.mul(4));
+      this.particleBuffer.element(instanceIndex).get("C").assign(B.mul(4));
       particlePosition.addAssign(particleVelocity.mul(this.uniforms.dt));
       particlePosition.assign(clamp(particlePosition, vec3(2), this.uniforms.gridSize.sub(2)));
 
       const wallStiffness = 0.38;
-      const xN = particlePosition.add(particleVelocity.mul(this.uniforms.dt).mul(3.0)).toConst('xN');
-      const wallMin = vec3(3).toConst('wallMin');
-      const wallMax = vec3(this.uniforms.gridSize).sub(3).toConst('wallMax');
-      If(xN.x.lessThan(wallMin.x), () => { particleVelocity.x.addAssign(wallMin.x.sub(xN.x).mul(wallStiffness)); });
-      If(xN.x.greaterThan(wallMax.x), () => { particleVelocity.x.addAssign(wallMax.x.sub(xN.x).mul(wallStiffness)); });
-      If(xN.y.lessThan(wallMin.y), () => { particleVelocity.y.addAssign(wallMin.y.sub(xN.y).mul(wallStiffness)); });
-      If(xN.y.greaterThan(wallMax.y), () => { particleVelocity.y.addAssign(wallMax.y.sub(xN.y).mul(wallStiffness)); });
-      If(xN.z.lessThan(wallMin.z), () => { particleVelocity.z.addAssign(wallMin.z.sub(xN.z).mul(wallStiffness)); });
-      If(xN.z.greaterThan(wallMax.z), () => { particleVelocity.z.addAssign(wallMax.z.sub(xN.z).mul(wallStiffness)); });
+      const xN = particlePosition.add(particleVelocity.mul(this.uniforms.dt).mul(3.0)).toConst("xN");
+      const wallMin = vec3(3).toConst("wallMin");
+      const wallMax = vec3(this.uniforms.gridSize).sub(3).toConst("wallMax");
+      If(xN.x.lessThan(wallMin.x), () => {
+        particleVelocity.x.addAssign(wallMin.x.sub(xN.x).mul(wallStiffness));
+      });
+      If(xN.x.greaterThan(wallMax.x), () => {
+        particleVelocity.x.addAssign(wallMax.x.sub(xN.x).mul(wallStiffness));
+      });
+      If(xN.y.lessThan(wallMin.y), () => {
+        particleVelocity.y.addAssign(wallMin.y.sub(xN.y).mul(wallStiffness));
+      });
+      If(xN.y.greaterThan(wallMax.y), () => {
+        particleVelocity.y.addAssign(wallMax.y.sub(xN.y).mul(wallStiffness));
+      });
+      If(xN.z.lessThan(wallMin.z), () => {
+        particleVelocity.z.addAssign(wallMin.z.sub(xN.z).mul(wallStiffness));
+      });
+      If(xN.z.greaterThan(wallMax.z), () => {
+        particleVelocity.z.addAssign(wallMax.z.sub(xN.z).mul(wallStiffness));
+      });
 
-      this.particleBuffer.element(instanceIndex).get('position').assign(particlePosition);
-      this.particleBuffer.element(instanceIndex).get('velocity').assign(particleVelocity);
+      this.particleBuffer.element(instanceIndex).get("position").assign(particlePosition);
+      this.particleBuffer.element(instanceIndex).get("velocity").assign(particleVelocity);
 
-      const direction = this.particleBuffer.element(instanceIndex).get('direction');
+      const direction = this.particleBuffer.element(instanceIndex).get("direction");
       direction.assign(mix(direction, particleVelocity, 0.1));
 
-      const color = hsvtorgb(vec3(particleDensity.div(this.uniforms.restDensity).mul(0.25).add(time.mul(0.05)), particleVelocity.length().mul(0.5).clamp(0, 1).mul(0.3).add(0.7), force.mul(0.3).add(0.7)));
-      this.particleBuffer.element(instanceIndex).get('color').assign(color);
+      const audioColorPulse = this.uniforms.audioColorPulse.toConst("audioColorPulse");
+      const hue = particleDensityVal
+        .x.toConst()
+        .div(this.uniforms.restDensity)
+        .mul(0.25)
+        .add(time.mul(0.05))
+        .add(audioBands.z.mul(audioLevel).mul(0.08));
+      const saturationBase = particleVelocity
+        .length()
+        .mul(0.5)
+        .clamp(0, 1)
+        .mul(0.3)
+        .add(0.7)
+        .add(audioBands.y.mul(audioLevel).mul(0.4));
+      const saturation = clamp(saturationBase, float(0), float(1));
+      const valueBase = force.mul(0.3).add(0.7).add(audioColorPulse.mul(0.4)).add(audioBeat.mul(0.1));
+      const value = clamp(valueBase, float(0), float(1));
+      const color = hsvtorgb(vec3(hue, saturation, value));
+      this.particleBuffer.element(instanceIndex).get("color").assign(color);
+
+      const cameraOffset = particlePosition.sub(cameraPosition).toConst("cameraOffset");
+      const distanceToCamera = cameraOffset.length().toVar("distanceToCamera");
+      const lodLevel = float(0).toVar("lodLevel");
+      If(distanceToCamera.greaterThan(lodNear), () => {
+        lodLevel.assign(float(1));
+        If(distanceToCamera.greaterThan(lodFar), () => {
+          lodLevel.assign(float(2));
+        });
+      });
+      this.particleBuffer.element(instanceIndex).get("lodLevel").assign(lodLevel);
     })().compute(maxParticles);
 
     // Ensure compute kernels use the initial particle count before the first update tick
@@ -412,12 +503,26 @@ class MlsMpmSimulator {
   }
 
   setPointer(pointer) {
-    const origin = pointer.origin.clone().multiplyScalar(64).add(new THREE.Vector3(32, 0, 0));
+    if (!pointer?.active) {
+      this.uniforms.mouseActive.value = 0;
+      return;
+    }
+    this.uniforms.mouseActive.value = 1;
+    const origin = pointer.origin.clone().multiplyScalar(this.stageScale).add(this.stageOffset);
     this.uniforms.mouseRayDirection.value.copy(pointer.direction.clone().normalize());
     this.uniforms.mouseRayOrigin.value.copy(origin);
-    if (pointer.active) {
-      this.mousePos.copy(pointer.point.clone().multiplyScalar(64));
+    this.mousePos.copy(pointer.point.clone().multiplyScalar(this.stageScale));
+  }
+
+  setCamera(camera) {
+    if (!camera) {
+      return;
     }
+    this.cameraPosition
+      .copy(camera.position)
+      .multiplyScalar(this.stageScale)
+      .add(this.stageOffset);
+    this.uniforms.cameraPosition.value.copy(this.cameraPosition);
   }
 
   async update(interval) {
@@ -448,6 +553,12 @@ class MlsMpmSimulator {
     this.uniforms.numParticles.value = this.numParticles || params.particleCount;
     this.uniforms.dynamicViscosity.value = params.viscosity;
     this.uniforms.restDensity.value = params.restDensity;
+    this.uniforms.turbulenceStrength.value = params.turbulence;
+    this.uniforms.pointerStrength.value = params.pointerForce;
+    this.uniforms.pointerFalloff.value = params.pointerFalloff;
+    this.uniforms.lodNearDistance.value = params.lodNear;
+    this.uniforms.lodFarDistance.value = params.lodFar;
+    this.metrics.gridResolution = this.gridResolution;
 
     if (params.particleCount !== this.numParticles) {
       this.numParticles = params.particleCount;
@@ -457,31 +568,42 @@ class MlsMpmSimulator {
       this.kernels.g2p.count = params.particleCount;
     }
 
-    interval = Math.min(interval, 1 / 60);
-    const dt = interval * 6 * params.speed;
+    const maxInterval = params.fixedTimestep * Math.max(1, params.maxSubsteps ?? 1);
+    const stepTarget = params.fixedTimestep;
+    const timeBudget = Math.min(interval * Math.max(params.speed, 0), maxInterval);
+    let substeps = Math.max(1, Math.min(Math.max(1, params.maxSubsteps ?? 1), Math.ceil(timeBudget / stepTarget)));
+    const dt = substeps > 0 ? timeBudget / substeps : stepTarget;
     this.uniforms.dt.value = dt;
+    this.metrics.frameTimeMs = interval * 1000;
+    this.metrics.particleCount = this.numParticles;
+    this.metrics.substeps = substeps;
 
-    this.mousePosArray.push(this.mousePos.clone());
-    if (this.mousePosArray.length > 3) {
-      this.mousePosArray.shift();
-    }
-    if (this.mousePosArray.length > 1) {
-      this.uniforms.mouseForce.value
-        .copy(this.mousePosArray[this.mousePosArray.length - 1])
-        .sub(this.mousePosArray[0])
-        .divideScalar(this.mousePosArray.length);
-    }
-
-    if (params.run) {
-      const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
-      const steps = Math.max(1, (params.iterations as number) | 0);
-      const subDt = dt / steps;
-      for (let i = 0; i < steps; i += 1) {
-        this.uniforms.dt.value = subDt;
-        await this.renderer.computeAsync(kernels);
+    if (this.uniforms.mouseActive.value) {
+      this.mousePosArray.push(this.mousePos.clone());
+      if (this.mousePosArray.length > 3) {
+        this.mousePosArray.shift();
       }
-      this.uniforms.dt.value = dt;
+      if (this.mousePosArray.length > 1) {
+        this.uniforms.mouseForce.value
+          .copy(this.mousePosArray[this.mousePosArray.length - 1])
+          .sub(this.mousePosArray[0])
+          .divideScalar(this.mousePosArray.length);
+      }
+    } else {
+      this.mousePosArray.length = 0;
+      this.uniforms.mouseForce.value.multiplyScalar(0.8);
     }
+
+    let computeTime = 0;
+    if (params.run && substeps > 0) {
+      const kernels = [this.kernels.clearGrid, this.kernels.p2g1, this.kernels.p2g2, this.kernels.updateGrid, this.kernels.g2p];
+      for (let i = 0; i < substeps; i += 1) {
+        const start = performance.now();
+        await this.renderer.computeAsync(kernels);
+        computeTime += performance.now() - start;
+      }
+    }
+    this.metrics.computeTimeMs = computeTime;
   }
 
   setAudioProfile(profile) {
@@ -530,14 +652,21 @@ export const createMlsMpmModule = (): ModuleInstance => {
           audioProfile = profile;
           simulator.setAudioProfile(profile);
         },
+        metrics: simulator.metrics,
       } as PhysicsService;
     },
     async update(tick: TickInfo) {
       if (!simulator) return;
       simulator.setParams(toPhysicsState(tick.config.physics));
+      const stageHandle = tick.context.stage;
+      if (stageHandle?.camera) {
+        simulator.setCamera(stageHandle.camera);
+      }
       const pointer = tick.context.services.pointer as PointerRay | undefined;
       if (pointer) {
         simulator.setPointer(pointer);
+      } else {
+        simulator.setPointer(null);
       }
       simulator.setAudioProfile(audioProfile);
       await simulator.update(tick.delta);

@@ -132,9 +132,18 @@ export interface PhysicsSimulatorHandle {
   setAudioProfile?: (profile: AudioProfile | null | undefined) => void;
 }
 
+export interface PhysicsMetrics {
+  frameTimeMs: number;
+  computeTimeMs: number;
+  particleCount: number;
+  substeps: number;
+  gridResolution: number;
+}
+
 export interface PhysicsService {
   simulator: PhysicsSimulatorHandle;
   setAudioProfile(profile: AudioProfile | null | undefined): void;
+  metrics: PhysicsMetrics;
 }
 
 export interface MeshRendererService {
@@ -150,6 +159,8 @@ export interface PostFxService {
   pipeline: THREE.PostProcessing;
   bloomPass: unknown;
   scenePass: unknown;
+  lensPass?: unknown;
+  temporalNode?: unknown;
 }
 
 export interface DashboardService {

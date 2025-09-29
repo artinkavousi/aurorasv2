@@ -14,9 +14,17 @@ import {
   transformNormalToView,
   mrt,
   uniform,
+  clamp,
 } from "three/tsl";
 import * as BufferGeometryUtils from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import type { ModuleInstance, TickInfo, AppContext, PhysicsService, MeshRendererService } from "../config";
+import type {
+  ModuleInstance,
+  TickInfo,
+  AppContext,
+  PhysicsService,
+  MeshRendererService,
+  PhysicsMetrics,
+} from "../config";
 import type { PhysicsConfig, PostFxConfig, RenderConfig } from "../config";
 
 interface MeshRendererState {
@@ -143,19 +151,24 @@ const createMeshResources = (simulator: PhysicsService["simulator"]) => {
     const particlePosition = particle.get("position");
     const particleDensity = particle.get("density");
     const particleDirection = particle.get("direction");
+    const lodLevel = particle.get("lodLevel").x;
     const mat = calcLookAtMatrix(particleDirection.xyz);
     vNormal.assign(transformNormalToView(mat.mul(normalLocal)));
     vAo.assign(particlePosition.z.div(64));
     vAo.assign(vAo.mul(vAo).oneMinus());
+    const lodScale = clamp(float(1).sub(lodLevel.mul(0.4)), float(0.35), float(1));
     return mat
-      .mul(attribute("position").xyz.mul(sizeUniform))
+      .mul(attribute("position").xyz.mul(sizeUniform).mul(lodScale))
       .mul(particleDensity.mul(0.4).add(0.5).clamp(0, 1))
       .add(particlePosition.mul(vec3(1, 1, 0.4)));
   })();
   // No explicit normalNode: legacy uses v_normalView from positionNode path
   material.colorNode = particle.get("color");
   material.aoNode = vAo;
-  material.positionNode = material.positionNode; // ensure node binding
+  material.opacityNode = clamp(float(1).sub(particle.get("lodLevel").x.mul(0.5)), float(0.1), float(1));
+  material.transparent = true;
+  material.opacityNode = clamp(float(1).sub(particle.get("lodLevel").x.mul(0.5)), float(0.1), float(1));
+  material.transparent = true;
 
   const mesh = new THREE.Mesh(geometry, material);
   mesh.onBeforeShadow = () => {
@@ -184,13 +197,14 @@ const applyConfig = (
   state: Required<MeshRendererState>,
   renderConfig: RenderConfig,
   physicsConfig: PhysicsConfig,
-  postfxConfig: PostFxConfig
+  postfxConfig: PostFxConfig,
+  physicsMetrics: PhysicsMetrics | undefined
 ) => {
-  // Legacy-like scaling: actual size decreases with particle count
-  const level = Math.max(physicsConfig.particleCount / 8192, 1);
-  const actualSize = (1.6 / Math.pow(level, 1 / 3)) * renderConfig.size;
-  state.sizeUniform.value = actualSize;
-  state.geometry.instanceCount = physicsConfig.particleCount;
+  state.sizeUniform.value = renderConfig.size;
+  const particleTarget = physicsMetrics
+    ? Math.max(1, Math.floor(physicsMetrics.particleCount * renderConfig.lodMeshRatio))
+    : physicsConfig.particleCount;
+  state.geometry.instanceCount = Math.min(physicsConfig.particleCount, particleTarget);
   const bloom = postfxConfig.bloom;
   if (bloom && !state.material.mrtNode) {
     state.material.mrtNode = mrt({ bloomIntensity: float(1) });
@@ -240,7 +254,14 @@ export const createMeshRendererModule = (): ModuleInstance => {
       if (!mesh || !geometry || !material || !sizeUniform) {
         return;
       }
-      applyConfig({ mesh, geometry, material, sizeUniform }, tick.config.render, tick.config.physics, tick.config.postfx);
+      const physics = tick.context.services.physics;
+      applyConfig(
+        { mesh, geometry, material, sizeUniform },
+        tick.config.render,
+        tick.config.physics,
+        tick.config.postfx,
+        physics?.metrics
+      );
       mesh.visible = tick.config.render.mode !== "points";
     },
     async dispose(context: AppContext) {

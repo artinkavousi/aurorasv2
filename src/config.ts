@@ -38,6 +38,7 @@ export interface PhysicsConfig {
   workerEnabled: boolean;
   fixedTimestep: number;
   iterations: number;
+  maxSubsteps: number;
   stiffness: number;
   density: number;
   restDensity: number;
@@ -47,12 +48,25 @@ export interface PhysicsConfig {
   gravity: Vector3Tuple;
   gravitySensor: Vector3Tuple;
   accelerometer: Vector3Tuple;
+  gridResolution: number;
+  minGridResolution: number;
+  maxGridResolution: number;
+  adaptiveEnabled: boolean;
+  adaptiveTargetFrameMs: number;
+  pointerForce: number;
+  pointerFalloff: number;
+  turbulence: number;
+  lodNear: number;
+  lodFar: number;
 }
 
 export interface RenderConfig {
   mode: "mesh" | "points" | "hybrid";
   size: number;
   bloomMask: number;
+  lodMeshRatio: number;
+  pointSizeMin: number;
+  pointSizeMax: number;
 }
 
 export interface PostFxConfig {
@@ -60,8 +74,20 @@ export interface PostFxConfig {
   bloomThreshold: number;
   bloomStrength: number;
   bloomRadius: number;
-  chromaticAberration: number;
-  vignetteStrength: number;
+  focusCenter: [number, number];
+  focusInnerRadius: number;
+  focusOuterRadius: number;
+  blurStrength: number;
+  blurIterations: number;
+  chromaticAberrationStrength: number;
+  chromaticAberrationScale: number;
+  lensStreaks: boolean;
+  lensStreakIntensity: number;
+  lensStreakThreshold: number;
+  lensStreakStretch: number;
+  temporalEnabled: boolean;
+  temporalFeedback: number;
+  temporalBlend: number;
 }
 
 export interface AudioConfig {
@@ -142,6 +168,7 @@ export const defaultConfig: AppConfig = {
     workerEnabled: false,
     fixedTimestep: 1 / 120,
     iterations: 3,
+    maxSubsteps: 4,
     stiffness: 3,
     density: 1,
     restDensity: 1,
@@ -150,19 +177,44 @@ export const defaultConfig: AppConfig = {
     gravity: [0, -0.8, 0],
     gravitySensor: [0, 0, 0],
     accelerometer: [0, 0, 0],
+    gridResolution: 64,
+    minGridResolution: 48,
+    maxGridResolution: 96,
+    adaptiveEnabled: true,
+    adaptiveTargetFrameMs: 12,
+    pointerForce: 1.5,
+    pointerFalloff: 0.08,
+    turbulence: 0.35,
+    lodNear: 18,
+    lodFar: 36,
   },
   render: {
     mode: "mesh",
     size: 1,
     bloomMask: 1,
+    lodMeshRatio: 0.35,
+    pointSizeMin: 0.35,
+    pointSizeMax: 1.2,
   },
   postfx: {
     bloom: true,
-    bloomThreshold: 0.001,
-    bloomStrength: 0.94,
-    bloomRadius: 0.8,
-    chromaticAberration: 0.0025,
-    vignetteStrength: 0.4,
+    bloomThreshold: 0.82,
+    bloomStrength: 0.9,
+    bloomRadius: 0.6,
+    focusCenter: [0.5, 0.5],
+    focusInnerRadius: 0.2,
+    focusOuterRadius: 0.62,
+    blurStrength: 0.045,
+    blurIterations: 36,
+    chromaticAberrationStrength: 0.9,
+    chromaticAberrationScale: 1.1,
+    lensStreaks: true,
+    lensStreakIntensity: 0.28,
+    lensStreakThreshold: 0.88,
+    lensStreakStretch: 2.4,
+    temporalEnabled: true,
+    temporalFeedback: 0.85,
+    temporalBlend: 0.5,
   },
   audio: {
     enabled: false,
