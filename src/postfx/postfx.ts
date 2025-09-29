@@ -1,4 +1,3 @@
-// @ts-nocheck
 import * as THREE from "three/webgpu";
 import { bloom } from "three/examples/jsm/tsl/display/BloomNode.js";
 import { hashBlur } from "three/examples/jsm/tsl/display/hashBlur.js";
